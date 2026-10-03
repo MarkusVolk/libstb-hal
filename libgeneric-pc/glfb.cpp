@@ -279,6 +279,12 @@ void GLFramebuffer::run()
 	}
 	glfb_priv->mUserEvent = SDL_RegisterEvents(1);
 	glfb_priv->setupRender();
+	/* the shutdown joins this thread, so its signal must not land here */
+	sigset_t set;
+	sigemptyset(&set);
+	sigaddset(&set, SIGTERM);
+	sigaddset(&set, SIGINT);
+	pthread_sigmask(SIG_BLOCK, &set, NULL);
 	while (!glfb_priv->mShutDown)
 	{
 		glfb_priv->pollEvents();
@@ -434,8 +440,11 @@ void GLFbPC::pollEvents()
 				mReInit = true;
 				break;
 			case SDL_EVENT_QUIT:
+				/* the window is all there is of neutrino on a desktop, closing
+				 * it ends the program. This thread keeps drawing until the
+				 * shutdown that follows takes the framebuffer down. */
 				hal_info("GLFB::%s: window closed, shutting down\n", __func__);
-				mShutDown = true;
+				kill(getpid(), SIGTERM);
 				break;
 			default:
 				break;
