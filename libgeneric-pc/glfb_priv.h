@@ -115,6 +115,16 @@ class GLFbPC
 		void render(); /* actual render function */
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
 		void handleKey(SDL_Keycode key);
+		void pushKey(int code);
+		/* a gamepad as remote control: what is held down repeats */
+		int mPadKey; /* the key that repeats, 0 for none */
+		uint64_t mPadNext; /* SDL ticks of its next repeat */
+		int mPadAxis[SDL_GAMEPAD_AXIS_COUNT]; /* the key each stick axis and trigger holds */
+		void padPress(int code);
+		void padRelease(int code);
+		void padButton(int button, bool down);
+		void padAxis(int axis, int value);
+		void padRepeat();
 		static bool producesText(SDL_Keycode key);
 		void wake();
 		bool setupRender(); /* the libmpv render context, needs the GL context */
