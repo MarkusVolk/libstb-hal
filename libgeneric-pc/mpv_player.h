@@ -40,6 +40,7 @@ class cMpvEngine : public OpenThreads::Thread
 		struct Track
 		{
 			int64_t id;
+			int64_t srcId; /* the PID for MPEG-TS */
 			std::string type; /* video, audio, sub */
 			std::string codec;
 			std::string lang;
