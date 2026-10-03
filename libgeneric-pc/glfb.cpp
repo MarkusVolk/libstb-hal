@@ -919,11 +919,18 @@ void GLFbPC::render()
 	if (!drawn)
 	{
 		const bool video = mVideoValid && !mTexStale;
-		glDisable(GL_BLEND);
-		glUniform1f(mState.u_bgra, video ? 0.0 : 1.0);
-		glBindTexture(GL_TEXTURE_2D, video ? mVideoTex : mState.displaytex);
-		drawSquare(zoom, xscale);
-		glEnable(GL_BLEND);
+		/* with mpv decoding everything the other texture only ever holds a
+		 * still picture; when none is up, the screen stays black between
+		 * two channels instead of showing the last one again */
+		const bool still = !HAL_live_mpv || (videoDecoder && videoDecoder->stillpicture);
+		if (video || still)
+		{
+			glDisable(GL_BLEND);
+			glUniform1f(mState.u_bgra, video ? 0.0 : 1.0);
+			glBindTexture(GL_TEXTURE_2D, video ? mVideoTex : mState.displaytex);
+			drawSquare(zoom, xscale);
+			glEnable(GL_BLEND);
+		}
 	}
 	drawOSD();
 
