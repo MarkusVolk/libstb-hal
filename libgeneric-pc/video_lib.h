@@ -243,6 +243,7 @@ class cVideo : public OpenThreads::Thread
 		bool thread_running;
 		VIDEO_FORMAT v_format;
 		VIDEO_STD v_std;
+		bool v_std_set;
 		OpenThreads::Mutex buf_m;
 		DISPLAY_AR display_aspect;
 		DISPLAY_AR_MODE display_crop;

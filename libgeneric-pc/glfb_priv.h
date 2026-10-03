@@ -62,6 +62,9 @@ class GLFbPC
 		{
 			return si;
 		}
+		bool setOSDResolution(int x, int y);
+		/* the mode of the display, where the window owns it */
+		void setDisplayMode(int w, int h, float rate);
 		void setOutputFormat(AVRational a, int h, int c)
 		{
 			mOA = a;
@@ -120,6 +123,14 @@ class GLFbPC
 		bool mDirect; /* what the log said last about how the video is drawn */
 		int mLastPig[4]; /* what the last picture on the screen was drawn with */
 		bool mLastDirect;
+		int mOsdW; /* the size the OSD texture has, the GL thread's copy */
+		int mOsdH;
+		bool mOsdResize;
+		int mWantW; /* display mode asked for with setDisplayMode() */
+		int mWantH;
+		float mWantRate;
+		bool mModeChange;
+		void applyDisplayMode(int w, int h, float rate, const char *who);
 		int mWinW; /* the window in pixels, the viewport may be smaller */
 		int mWinH;
 		bool mTexStale; /* the video was drawn directly, mVideoTex has an old frame */
