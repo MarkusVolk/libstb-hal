@@ -107,6 +107,7 @@ class GLFbPC
 		int mVideoW;
 		int mVideoH;
 		bool mVideoValid; /* mpv has drawn a frame since the last video-params change */
+		bool mFramePending;
 		int input_fd;
 		int64_t last_apts;
 		void run();

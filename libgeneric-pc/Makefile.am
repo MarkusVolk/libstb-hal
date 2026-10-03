@@ -27,6 +27,7 @@ AM_LDFLAGS = \
 libgeneric_la_SOURCES = \
 	hardware_caps.c \
 	dmx.cpp \
+	dmx_file.cpp \
 	video.cpp \
 	audio.cpp \
 	init.cpp \

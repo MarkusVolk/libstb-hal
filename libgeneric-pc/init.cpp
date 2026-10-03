@@ -13,6 +13,8 @@
 static bool initialized = false;
 GLFramebuffer *glfb = NULL;
 bool HAL_nodec = false;
+/* live TV is decoded by mpv; export HAL_LIVE=ffmpeg for the software decoder of old */
+bool HAL_live_mpv = true;
 
 
 void hal_api_init()
@@ -22,8 +24,17 @@ void hal_api_init()
 	hal_info("%s begin, initialized=%d, debug=0x%02x\n", __func__, (int)initialized, debuglevel);
 	/* the GL thread attaches its render context to the engine, so it has to exist first;
 	 * export HAL_NOMPV=1 to run without a player */
-	if (!getenv("HAL_NOMPV") && !cMpvEngine::getInstance())
+	const char *live = getenv("HAL_LIVE");
+	if (getenv("HAL_NOMPV"))
+		HAL_live_mpv = false;
+	else if (!cMpvEngine::getInstance())
+	{
 		hal_info("%s: libmpv engine not available, no playback\n", __func__);
+		HAL_live_mpv = false;
+	}
+	if (live && !strcmp(live, "ffmpeg"))
+		HAL_live_mpv = false;
+	hal_info("%s: live TV is decoded by %s\n", __func__, HAL_live_mpv ? "mpv" : "the FFmpeg software decoder");
 	if (! glfb)
 	{
 		int x = 1280, y = 720; /* default OSD FB resolution */
