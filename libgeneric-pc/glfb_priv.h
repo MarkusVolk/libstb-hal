@@ -26,14 +26,9 @@
 #include <OpenThreads/Mutex>
 #include <vector>
 #include <map>
-#if USE_OPENGL
 #include <SDL3/SDL.h>
 #include <GLES2/gl2.h>
 #include <linux/fb.h> /* for screeninfo etc. */
-#endif
-#if USE_CLUTTER
-#include <clutter/clutter.h>
-#endif
 #include "glfb.h"
 #include "mpv_player.h"
 struct mpv_render_context;
@@ -61,9 +56,7 @@ class GLFbPC
 		void blit()
 		{
 			mState.blit = true;
-#if USE_OPENGL
 			wake();
-#endif
 		};
 		fb_var_screeninfo getScreenInfo()
 		{
@@ -102,7 +95,6 @@ class GLFbPC
 
 		std::vector<unsigned char> *osd_buf; /* silly bounce buffer */
 
-#if USE_OPENGL
 		std::map<SDL_Keycode, int> mKeyMap;
 		SDL_Window *mWindow;
 		SDL_GLContext mContext;
@@ -115,16 +107,11 @@ class GLFbPC
 		int mVideoW;
 		int mVideoH;
 		bool mVideoValid; /* mpv has drawn a frame since the last video-params change */
-#endif
-#if USE_CLUTTER
-		std::map<int, int> mKeyMap;
-#endif
 		int input_fd;
 		int64_t last_apts;
 		void run();
 
 		void render(); /* actual render function */
-#if USE_OPENGL
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
 		void handleKey(const SDL_KeyboardEvent &ev);
 		void wake();
@@ -136,11 +123,6 @@ class GLFbPC
 		bool setupGLObjects(); /* shaders, textures and stuff */
 		void releaseGLObjects();
 		void drawSquare(float size, float x_factor = 1); /* do not be square */
-#endif
-#if USE_CLUTTER
-		static void rendercb(); /* callback for clutter */
-		static bool keyboardcb(ClutterActor *actor, ClutterEvent *event, gpointer user_data);
-#endif
 
 		void initKeys(); /* setup key bindings for window */
 
@@ -149,7 +131,6 @@ class GLFbPC
 			int width; /* width and height, fixed for a framebuffer instance */
 			int height;
 			bool blit;
-#if USE_OPENGL
 			GLuint osdtex; /* holds the OSD texture */
 			GLuint displaytex; /* holds the display texture */
 			GLuint program; /* the GLES2 shader program */
@@ -159,7 +140,6 @@ class GLFbPC
 			GLint u_xproj; /* uniform: orthographic x scaling */
 			GLint u_bgra; /* uniform: 1 swizzles the BGRA CPU buffers, 0 for the mpv texture */
 			float xproj;
-#endif
 		} mState;
 
 		void bltOSDBuffer();
