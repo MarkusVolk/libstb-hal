@@ -77,6 +77,7 @@ if test x$BOXTYPE = xgeneric -a x$BOXMODEL != xraspi; then
 	if test x"$enable_clutter" != xyes; then
 		PKG_CHECK_MODULES([SDL3], [sdl3 >= 3.2.0])
 		PKG_CHECK_MODULES([GLES2], [glesv2])
+		PKG_CHECK_MODULES([MPV], [mpv >= 1.108])
 	fi
 fi
 
