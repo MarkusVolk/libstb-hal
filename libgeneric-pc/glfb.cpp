@@ -113,6 +113,9 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mVideoW = mVideoH = 0;
 	mVideoValid = false;
 	mFramePending = false;
+	mPadKey = 0;
+	mPadNext = 0;
+	memset(mPadAxis, 0, sizeof(mPadAxis));
 
 	/* linux framebuffer compat mode */
 	si.bits_per_pixel = 32;
@@ -239,6 +242,9 @@ void GLFramebuffer::run()
 		hal_info("GLFB: SDL_Init failed: %s\n", SDL_GetError());
 		_exit(1); /* Life is hard */
 	}
+	/* gamepads are opened as they show up, see pollEvents() */
+	if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
+		hal_info("GLFB: no gamepad support: %s\n", SDL_GetError());
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -411,12 +417,37 @@ void GLFbPC::pollEvents()
 		timeout = sleep_us > 1000 ? sleep_us / 1000 : 1;
 	if (mFramePending)
 		timeout = 5;
-	if (!SDL_WaitEventTimeout(&ev, timeout))
+	if (mPadKey)
+	{
+		uint64_t now = SDL_GetTicks();
+		int wait = mPadNext > now ? (int)(mPadNext - now) : 0;
+		if (wait < timeout)
+			timeout = wait;
+	}
+	bool got = SDL_WaitEventTimeout(&ev, timeout);
+	padRepeat();
+	if (!got)
 		return;
 	do
 	{
 		switch (ev.type)
 		{
+			case SDL_EVENT_GAMEPAD_ADDED:
+				if (SDL_OpenGamepad(ev.gdevice.which))
+					hal_info("GLFB::%s: gamepad '%s'\n", __func__, SDL_GetGamepadNameForID(ev.gdevice.which));
+				break;
+			case SDL_EVENT_GAMEPAD_REMOVED:
+				SDL_CloseGamepad(SDL_GetGamepadFromID(ev.gdevice.which));
+				mPadKey = 0;
+				memset(mPadAxis, 0, sizeof(mPadAxis));
+				break;
+			case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+			case SDL_EVENT_GAMEPAD_BUTTON_UP:
+				padButton(ev.gbutton.button, ev.gbutton.down);
+				break;
+			case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+				padAxis(ev.gaxis.axis, ev.gaxis.value);
+				break;
 			case SDL_EVENT_KEY_DOWN:
 				if (!producesText(ev.key.key))
 					handleKey(ev.key.key);
@@ -480,9 +511,14 @@ void GLFbPC::handleKey(SDL_Keycode key)
 	std::map<SDL_Keycode, int>::const_iterator i = mKeyMap.find(key);
 	if (i == mKeyMap.end())
 		return;
+	pushKey(i->second);
+}
+
+void GLFbPC::pushKey(int code)
+{
 	struct input_event iev;
 	memset(&iev, 0, sizeof(iev));
-	iev.code = i->second;
+	iev.code = code;
 	iev.value = 1; /* key down */
 	iev.type = EV_KEY;
 	gettimeofday(&iev.time, NULL);
@@ -490,6 +526,133 @@ void GLFbPC::handleKey(SDL_Keycode key)
 	write(input_fd, &iev, sizeof(iev));
 	iev.value = 0; /* neutrino is stupid, so push key up directly after key down */
 	write(input_fd, &iev, sizeof(iev));
+}
+
+/* the first repeat of a held gamepad key comes late, the others quickly */
+#define PAD_REPEAT_DELAY	400
+#define PAD_REPEAT_RATE		120
+/* how far the stick or a trigger has to go, and how far back to let go */
+#define PAD_AXIS_ON		20000
+#define PAD_AXIS_OFF		12000
+
+static bool pad_repeats(int code)
+{
+	switch (code)
+	{
+		case KEY_UP: case KEY_DOWN: case KEY_LEFT: case KEY_RIGHT:
+		case KEY_PAGEUP: case KEY_PAGEDOWN:
+		case KEY_VOLUMEUP: case KEY_VOLUMEDOWN:
+			return true;
+		default:
+			return false;
+	}
+}
+
+void GLFbPC::padPress(int code)
+{
+	pushKey(code);
+	if (pad_repeats(code))
+	{
+		mPadKey = code;
+		mPadNext = SDL_GetTicks() + PAD_REPEAT_DELAY;
+	}
+	else
+		mPadKey = 0;
+}
+
+void GLFbPC::padRelease(int code)
+{
+	if (mPadKey == code)
+		mPadKey = 0;
+}
+
+void GLFbPC::padRepeat()
+{
+	if (!mPadKey || SDL_GetTicks() < mPadNext)
+		return;
+	pushKey(mPadKey);
+	mPadNext = SDL_GetTicks() + PAD_REPEAT_RATE;
+}
+
+/* SDL names the buttons by where they are, so this fits every gamepad it
+ * knows. The names here are the ones on a PlayStation pad. */
+void GLFbPC::padButton(int button, bool down)
+{
+	int code;
+	switch (button)
+	{
+		case SDL_GAMEPAD_BUTTON_DPAD_UP:	code = KEY_UP; break;
+		case SDL_GAMEPAD_BUTTON_DPAD_DOWN:	code = KEY_DOWN; break;
+		case SDL_GAMEPAD_BUTTON_DPAD_LEFT:	code = KEY_LEFT; break;
+		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:	code = KEY_RIGHT; break;
+		case SDL_GAMEPAD_BUTTON_SOUTH:		code = KEY_OK; break;	/* cross */
+		case SDL_GAMEPAD_BUTTON_WEST:		code = KEY_EXIT; break;	/* square */
+		case SDL_GAMEPAD_BUTTON_EAST:		code = KEY_HOME; break;	/* circle */
+		case SDL_GAMEPAD_BUTTON_NORTH:		code = KEY_WWW; break;	/* triangle */
+		case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:	code = KEY_RED; break;
+		case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:	code = KEY_GREEN; break;
+		case SDL_GAMEPAD_BUTTON_START:		code = KEY_MENU; break;
+		case SDL_GAMEPAD_BUTTON_GUIDE:		code = KEY_MENU; break;
+		case SDL_GAMEPAD_BUTTON_BACK:		code = KEY_HELP; break;	/* create */
+		case SDL_GAMEPAD_BUTTON_RIGHT_STICK:	code = KEY_INFO; break;
+		case SDL_GAMEPAD_BUTTON_TOUCHPAD:	code = KEY_MUTE; break;
+		default:
+			hal_debug("GLFB::%s: button %d is not used\n", __func__, button);
+			return;
+	}
+	hal_debug("GLFB::%s: button %d %s -> 0x%x\n", __func__, button, down ? "down" : "up", code);
+	if (down)
+		padPress(code);
+	else
+		padRelease(code);
+}
+
+/* the left stick works like the direction pad, the right one sets the volume
+ * and pages, and the triggers are the two colours the shoulder buttons lack */
+void GLFbPC::padAxis(int axis, int value)
+{
+	int code = 0;
+	switch (axis)
+	{
+		case SDL_GAMEPAD_AXIS_LEFTX:
+			code = value < 0 ? KEY_LEFT : KEY_RIGHT;
+			break;
+		case SDL_GAMEPAD_AXIS_LEFTY:
+			code = value < 0 ? KEY_UP : KEY_DOWN;
+			break;
+		case SDL_GAMEPAD_AXIS_RIGHTX:
+			code = value < 0 ? KEY_PAGEUP : KEY_PAGEDOWN;
+			break;
+		case SDL_GAMEPAD_AXIS_RIGHTY:
+			code = value < 0 ? KEY_VOLUMEUP : KEY_VOLUMEDOWN;
+			break;
+		case SDL_GAMEPAD_AXIS_LEFT_TRIGGER:
+			code = KEY_YELLOW;
+			break;
+		case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER:
+			code = KEY_BLUE;
+			break;
+		default:
+			return;
+	}
+	if (value < 0)
+		value = -value;
+
+	int &held = mPadAxis[axis];
+	if (value >= PAD_AXIS_ON)
+	{
+		if (held != code)
+		{
+			hal_debug("GLFB::%s: axis %d -> 0x%x\n", __func__, axis, code);
+			held = code;
+			padPress(code);
+		}
+	}
+	else if (value <= PAD_AXIS_OFF && held)
+	{
+		padRelease(held);
+		held = 0;
+	}
 }
 
 int sleep_us = 30000;
