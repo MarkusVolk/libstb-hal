@@ -931,6 +931,11 @@ bool cMpvEngine::setDouble(const char *name, double v)
 	return mpv_set_property(mpv, name, MPV_FORMAT_DOUBLE, &v) >= 0;
 }
 
+void cMpvEngine::setDisplayFps(double fps)
+{
+	mpv_set_property_async(mpv, 0, "display-fps-override", MPV_FORMAT_DOUBLE, &fps);
+}
+
 bool cMpvEngine::setString(const char *name, const std::string &v)
 {
 	return mpv_set_property_string(mpv, name, v.c_str()) >= 0;
