@@ -798,6 +798,11 @@ void GLFbPC::render()
 		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(mWindow));
 		if (mode)
 			hal_info("%s: display mode %dx%d at %.2f Hz\n", __func__, mode->w, mode->h, mode->refresh_rate);
+		/* mpv picks the frames to show by the display's rate; without it,
+		 * a 50 Hz programme on a 25 Hz display loses more than every other one */
+		cMpvEngine *e = cMpvEngine::getInstance();
+		if (e && mode && mode->refresh_rate > 0)
+			e->setDisplayFps(mode->refresh_rate);
 		mViewX = xoff;
 		mViewY = yoff;
 		glViewport(xoff, yoff, *mX, *mY);
