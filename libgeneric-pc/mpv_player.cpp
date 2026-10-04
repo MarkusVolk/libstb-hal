@@ -374,6 +374,7 @@ cMpvEngine::cMpvEngine()
 	mVideo.w = mVideo.h = 0;
 	mVideo.sw = mVideo.sh = 0;
 	mVideo.aspect = 0;
+	mVideo.drmprime = false;
 	mVideo.fps = 0;
 	memset(&mLive, 0, sizeof(mLive));
 
@@ -685,6 +686,7 @@ void cMpvEngine::updateVideoParams(mpv_node *node)
 	v.w = v.h = 0;
 	v.sw = v.sh = 0;
 	v.aspect = 0;
+	v.drmprime = false;
 	if (node && node->format == MPV_FORMAT_NODE_MAP)
 	{
 		v.w = nodeInt(nodeMapGet(node, "dw"));
@@ -699,6 +701,7 @@ void cMpvEngine::updateVideoParams(mpv_node *node)
 		 * them out, and a software filter on top of that is more than
 		 * such a machine can do at 1080i. Go without for those. */
 		bool zero_copy = nodeString(nodeMapGet(node, "pixelformat")) == "drm_prime";
+		v.drmprime = v.valid && zero_copy;
 		if (v.valid && zero_copy != mNoDeinterlace)
 		{
 			mNoDeinterlace = zero_copy;
@@ -934,6 +937,26 @@ bool cMpvEngine::setDouble(const char *name, double v)
 void cMpvEngine::setDisplayFps(double fps)
 {
 	mpv_set_property_async(mpv, 0, "display-fps-override", MPV_FORMAT_DOUBLE, &fps);
+}
+
+void cMpvEngine::setVideoFit(double panscan, double aspect)
+{
+	char a[32];
+	if (aspect > 0)
+		snprintf(a, sizeof(a), "%.6f", aspect);
+	else
+		snprintf(a, sizeof(a), "no");
+	const char *ap = a;
+	mpv_set_property_async(mpv, 0, "panscan", MPV_FORMAT_DOUBLE, &panscan);
+	mpv_set_property_async(mpv, 0, "video-aspect-override", MPV_FORMAT_STRING, &ap);
+}
+
+void cMpvEngine::setVideoMargins(double left, double top, double right, double bottom)
+{
+	mpv_set_property_async(mpv, 0, "video-margin-ratio-left", MPV_FORMAT_DOUBLE, &left);
+	mpv_set_property_async(mpv, 0, "video-margin-ratio-top", MPV_FORMAT_DOUBLE, &top);
+	mpv_set_property_async(mpv, 0, "video-margin-ratio-right", MPV_FORMAT_DOUBLE, &right);
+	mpv_set_property_async(mpv, 0, "video-margin-ratio-bottom", MPV_FORMAT_DOUBLE, &bottom);
 }
 
 bool cMpvEngine::setString(const char *name, const std::string &v)

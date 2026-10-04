@@ -40,6 +40,8 @@
 #include <linux/input.h>
 #include <climits>
 #include <mpv/render_gl.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
 #include "glfb_priv.h"
 #include "video_lib.h"
 #include "audio_lib.h"
@@ -173,6 +175,16 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mTexStale = false;
 	mDirect = false;
 	mWinW = mWinH = 0;
+	mPlaneOK = false;
+	mOnPlane = false;
+	mDrmFd = -1;
+	mPlaneReq = NULL;
+	mPlaneFbo = mPlaneTex = 0;
+	mPlaneFboW = mPlaneFboH = 0;
+	mOsdSum = 0;
+	mPlaneRedraw = true;
+	mMargins[0] = mMargins[1] = mMargins[2] = mMargins[3] = 0;
+	mFit[0] = mFit[1] = 0;
 	mOsdW = x;
 	mOsdH = y;
 	mOsdResize = false;
@@ -303,6 +315,15 @@ void GLFramebuffer::run()
 	int y = glfb_priv->mState.height;
 	hal_info("GLFB: GL thread starting x %d y %d\n", x, y);
 	SDL_SetAppMetadata("Neutrino", NULL, "neutrino");
+#ifdef SDL_HINT_KMSDRM_DISPLAY_PLANE
+	/* on KMS the window goes to an overlay plane, so that the primary one
+	 * below it is free for the video; GLFB_VIDEO_PLANE=0 keeps it all in GL.
+	 * An SDL without the hint keeps the window on the primary plane, and
+	 * the video stays in GL. */
+	const char *plane = getenv("GLFB_VIDEO_PLANE");
+	if (!plane || strcmp(plane, "0"))
+		SDL_SetHint(SDL_HINT_KMSDRM_DISPLAY_PLANE, "overlay");
+#endif
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
 		hal_info("GLFB: SDL_Init failed: %s\n", SDL_GetError());
@@ -828,6 +849,87 @@ void GLFbPC::render()
 		vp = engine->getVideoParams();
 	if (!vp.valid)
 		mVideoValid = false;
+
+	/* The video on the plane below the window: the GPU only draws the OSD,
+	 * and only when it has changed. */
+	const bool on_plane = mPlaneOK && vp.valid && vp.drmprime;
+	if (on_plane != mOnPlane)
+	{
+		mOnPlane = on_plane;
+		mState.blit = true; /* the window is drawn anew in either case */
+		mPlaneRedraw = true;
+		hal_info("GLFB::%s: the video is %s\n", __func__, on_plane ? "on the plane below the window" : "drawn in the window");
+	}
+	if (on_plane)
+	{
+		static uint64_t plane_since, plane_time, plane_max;
+		static int plane_frames;
+		if (flags & MPV_RENDER_UPDATE_FRAME)
+		{
+			bool draw = engine && engine->renderBegin();
+			mFramePending = false;
+			if (draw)
+			{
+				uint64_t t0 = SDL_GetTicksNS();
+				renderPlane();
+				uint64_t t = SDL_GetTicksNS() - t0;
+				mpv_render_context_report_swap(mRender);
+				mVideoValid = true;
+				mTexStale = true;
+				plane_frames++;
+				plane_time += t;
+				if (t > plane_max)
+					plane_max = t;
+			}
+			else if (mRender)
+			{
+				int skip = 1;
+				mpv_render_param params[2];
+				params[0].type = MPV_RENDER_PARAM_SKIP_RENDERING;
+				params[0].data = &skip;
+				params[1].type = MPV_RENDER_PARAM_INVALID;
+				params[1].data = NULL;
+				mpv_render_context_render(mRender, params);
+			}
+			if (engine)
+				engine->renderEnd();
+		}
+		uint64_t now = SDL_GetTicksNS();
+		if (now - plane_since >= 10 * SDL_NS_PER_SECOND)
+		{
+			if (plane_frames)
+				hal_debug("GLFB::%s: %d video frames on the plane in %.1f s, %.1f ms per frame until it is up, longest %.1f ms\n",
+					  __func__, plane_frames, (now - plane_since) / 1e9,
+					  plane_time / 1e6 / plane_frames, plane_max / 1e6);
+			plane_since = now;
+			plane_frames = 0;
+			plane_time = plane_max = 0;
+		}
+		if (!mState.blit && !reinit)
+			return;
+		mState.blit = false;
+
+		/* neutrino blits four times a second whether anything has changed
+		 * or not; each swap is a flip of the window's plane, and the video
+		 * flip that follows has to wait a frame for it */
+		uint64_t sum = osdChecksum();
+		if (sum == mOsdSum && !reinit && !mPlaneRedraw)
+			return;
+		mOsdSum = sum;
+		mPlaneRedraw = false;
+
+		/* the window: transparent where nothing but the video is */
+		bltOSDBuffer();
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(mViewX, mViewY, *mX, *mY);
+		glClearColor(0.0, 0.0, 0.0, 0.0);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glClearColor(0.0, 0.0, 0.0, 1.0);
+		drawOSD();
+		SDL_GL_SwapWindow(mWindow);
+		return;
+	}
+
 	/* Drawing the video into a texture first and that onto the window costs
 	 * a pass over every pixel that small GPUs do not have to spare at 50
 	 * frames per second. Where the picture fills the window anyway, mpv
@@ -1101,7 +1203,13 @@ bool GLFbPC::setupRender()
 	{
 		/* KMS without a display server: vaapi opens the render node itself */
 		drm.render_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
-		if (drm.render_fd >= 0)
+#ifdef SDL_HINT_KMSDRM_DISPLAY_PLANE
+		const char *driver = SDL_GetCurrentVideoDriver();
+		const char *plane = getenv("GLFB_VIDEO_PLANE");
+		if (driver && !strcmp(driver, "kmsdrm") && (!plane || strcmp(plane, "0")))
+			mPlaneOK = setupPlane(&drm);
+#endif
+		if (drm.render_fd >= 0 || mPlaneOK)
 		{
 			params[n].type = MPV_RENDER_PARAM_DRM_DISPLAY_V2;
 			params[n++].data = &drm;
@@ -1118,7 +1226,167 @@ bool GLFbPC::setupRender()
 	}
 	mpv_render_context_set_update_callback(mRender, renderUpdateCb, this);
 	hal_info("GLFB::%s: libmpv render context ready (%s)\n", __func__, wl ? "wayland display" : x11 ? "x11 display" : drm.render_fd >= 0 ? "drm render node" : "no native display");
+	if (mPlaneOK)
+		hal_info("GLFB::%s: DRM PRIME video goes to the primary plane of CRTC %d, the window is above it\n", __func__, drm.crtc_id);
 	return true;
+}
+
+/* The CRTC and connector of the display, which SDL does not tell: the
+ * connected connector and the CRTC its encoder drives. */
+bool GLFbPC::setupPlane(void *params)
+{
+	mpv_opengl_drm_params_v2 *drm = (mpv_opengl_drm_params_v2 *)params;
+	SDL_PropertiesID props = SDL_GetWindowProperties(mWindow);
+	int fd = (int)SDL_GetNumberProperty(props, SDL_PROP_WINDOW_KMSDRM_DRM_FD_NUMBER, -1);
+	if (fd < 0)
+		return false;
+
+	int crtc = -1, connector = -1;
+	drmModeRes *res = drmModeGetResources(fd);
+	for (int i = 0; res && i < res->count_connectors && crtc < 0; i++)
+	{
+		drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
+		if (!c)
+			continue;
+		if (c->connection == DRM_MODE_CONNECTED && c->encoder_id)
+		{
+			drmModeEncoder *e = drmModeGetEncoder(fd, c->encoder_id);
+			if (e && e->crtc_id)
+			{
+				crtc = e->crtc_id;
+				connector = c->connector_id;
+			}
+			drmModeFreeEncoder(e);
+		}
+		drmModeFreeConnector(c);
+	}
+	drmModeFreeResources(res);
+	if (crtc < 0)
+	{
+		hal_info("GLFB::%s: no active CRTC, the video stays in GL\n", __func__);
+		return false;
+	}
+
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	/* only the overlay interop: the frames are never drawn by the GPU */
+	engine->setString("gpu-hwdec-interop", "drmprime-overlay");
+	engine->setString("drm-drmprime-video-plane", "primary");
+	engine->setString("drm-draw-plane", "overlay");
+
+	mDrmFd = fd;
+	drm->fd = fd;
+	drm->crtc_id = crtc;
+	drm->connector_id = connector;
+	drm->atomic_request_ptr = &mPlaneReq;
+	return true;
+}
+
+/* mpv puts the frame on the plane by adding to our atomic request, which
+ * is committed here; the GPU does no more than clear the target. The
+ * target has the size of the window: mpv places the picture on the plane
+ * where it would draw it there. */
+bool GLFbPC::renderPlane()
+{
+	int w = mWinW > 0 ? mWinW : 1, h = mWinH > 0 ? mWinH : 1;
+	if (!mPlaneFbo || w != mPlaneFboW || h != mPlaneFboH)
+	{
+		if (!mPlaneFbo)
+			glGenFramebuffers(1, &mPlaneFbo);
+		if (!mPlaneTex)
+			glGenTextures(1, &mPlaneTex);
+		glBindTexture(GL_TEXTURE_2D, mPlaneTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glBindFramebuffer(GL_FRAMEBUFFER, mPlaneFbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mPlaneTex, 0);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		mPlaneFboW = w;
+		mPlaneFboH = h;
+	}
+	planeMargins();
+
+	mPlaneReq = drmModeAtomicAlloc();
+	mpv_opengl_fbo fbo = { (int)mPlaneFbo, w, h, 0 };
+	/* mpv would wait for the frame's time and the commit for the vblank
+	 * after it, a frame late; the vblank alone keeps the time */
+	int block = 0;
+	mpv_render_param params[3];
+	params[0].type = MPV_RENDER_PARAM_OPENGL_FBO;
+	params[0].data = &fbo;
+	params[1].type = MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME;
+	params[1].data = &block;
+	params[2].type = MPV_RENDER_PARAM_INVALID;
+	params[2].data = NULL;
+	glDisable(GL_BLEND);
+	int r = mpv_render_context_render(mRender, params);
+	restoreGLState();
+	/* The commit waits for the flip, which paces the frames to the display
+	 * and lets the swap that is reported next to mpv be the real one. */
+	int c = (r >= 0 && mPlaneReq) ? drmModeAtomicCommit(mDrmFd, mPlaneReq, 0, NULL) : -1;
+	if (mPlaneReq)
+		drmModeAtomicFree(mPlaneReq);
+	mPlaneReq = NULL;
+	static bool warned = false;
+	if (c < 0 && !warned)
+	{
+		warned = true;
+		hal_info("GLFB::%s: render %d, commit %d: %m\n", __func__, r, c);
+	}
+	return r >= 0;
+}
+
+/* the picture in the menus: what the GL quad got as position, mpv gets as
+ * the room it leaves around the video */
+void GLFbPC::planeMargins()
+{
+	double m[4] = { 0, 0, 0, 0 };
+	if (videoDecoder && videoDecoder->pig_x > 0 && videoDecoder->pig_y > 0 &&
+	    videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0 && mOsdW > 0 && mOsdH > 0)
+	{
+		m[0] = (double)videoDecoder->pig_x / mOsdW;
+		m[1] = (double)videoDecoder->pig_y / mOsdH;
+		m[2] = 1.0 - (double)(videoDecoder->pig_x + videoDecoder->pig_w) / mOsdW;
+		m[3] = 1.0 - (double)(videoDecoder->pig_y + videoDecoder->pig_h) / mOsdH;
+		for (int i = 0; i < 4; i++)
+			m[i] = m[i] < 0 ? 0 : (m[i] > 1 ? 1 : m[i]);
+	}
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	if (engine && memcmp(m, mMargins, sizeof(m)))
+	{
+		memcpy(mMargins, m, sizeof(m));
+		engine->setVideoMargins(m[0], m[1], m[2], m[3]);
+	}
+
+	/* the 4:3 modes, as the GL quad does them: letterbox shows all of the
+	 * picture, panscan fills the window, 14:9 goes half the way, and
+	 * "none" stretches it to the window */
+	double fit[2] = { 0, 0 };
+	if (m[0] > 0 || m[1] > 0 || m[2] > 0 || m[3] > 0)
+	{
+		/* the picture in the menus fills its box, as a box with a video
+		 * scaler does it */
+		double w = (1.0 - m[0] - m[2]) * mWinW, h = (1.0 - m[1] - m[3]) * mWinH;
+		if (w > 0 && h > 0)
+			fit[1] = w / h;
+	}
+	else switch (mCrop)
+	{
+		case DISPLAY_AR_MODE_PANSCAN:
+			fit[0] = 1.0;
+			break;
+		case DISPLAY_AR_MODE_PANSCAN2:
+			fit[0] = 0.5;
+			break;
+		case DISPLAY_AR_MODE_NONE:
+			fit[1] = av_q2d(mOA);
+			break;
+		default:
+			break;
+	}
+	if (engine && memcmp(fit, mFit, sizeof(fit)))
+	{
+		memcpy(mFit, fit, sizeof(fit));
+		engine->setVideoFit(fit[0], fit[1]);
+	}
 }
 
 void GLFbPC::teardownRender()
@@ -1200,7 +1468,9 @@ void GLFbPC::restoreGLState()
 	glDisable(GL_CULL_FACE);
 	glDisable(GL_STENCIL_TEST);
 	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	/* the alpha that ends up in the window counts where the video plane
+	 * below it shows; this keeps it right, premultiplied */
+	glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 	glBlendEquation(GL_FUNC_ADD);
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -1298,6 +1568,21 @@ void GLFbPC::bltOSDBuffer()
 	mOsdBox[1] = y0;
 	mOsdBox[2] = x1 + 1;
 	mOsdBox[3] = y1 + 1;
+}
+
+/* cheap enough for a few times a second, and an unchanged OSD has the
+ * same sum */
+uint64_t GLFbPC::osdChecksum()
+{
+	const uint64_t *p = (const uint64_t *)osd_buf->data();
+	size_t n = (size_t)mOsdW * mOsdH * 4 / sizeof(uint64_t);
+	uint64_t a = 0, b = 0;
+	for (size_t i = 0; i < n; i++)
+	{
+		a += p[i];
+		b ^= p[i] + i;
+	}
+	return a ^ (b << 1) ^ n;
 }
 
 void GLFbPC::drawOSD()
