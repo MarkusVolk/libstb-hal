@@ -659,6 +659,11 @@ int sleep_us = 30000;
 
 void GLFbPC::render()
 {
+	/* where the time of a frame goes, for the debug output */
+	static uint64_t stat_since, stat_video, stat_draw, stat_swap, stat_max;
+	static int stat_frames;
+	uint64_t t_start = SDL_GetTicksNS();
+
 	mReInitLock.lock();
 	if (mReInit)
 	{
@@ -686,6 +691,9 @@ void GLFbPC::render()
 		xoff = (x - *mX) / 2;
 		yoff = (y - *mY) / 2;
 		hal_info("%s: reinit mX:%d mY:%d xoff:%d yoff:%d fs %d\n", __func__, *mX, *mY, xoff, yoff, mFullscreen);
+		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(mWindow));
+		if (mode)
+			hal_info("%s: display mode %dx%d at %.2f Hz\n", __func__, mode->w, mode->h, mode->refresh_rate);
 		mViewX = xoff;
 		mViewY = yoff;
 		glViewport(xoff, yoff, *mX, *mY);
@@ -739,6 +747,7 @@ void GLFbPC::render()
 		if (engine)
 			engine->renderEnd();
 	}
+	uint64_t t_video = SDL_GetTicksNS();
 	if (mVideoValid)
 	{
 		AVRational a;
@@ -824,9 +833,30 @@ void GLFbPC::render()
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 	drawSquare(1.0, -100);
 
+	uint64_t t_draw = SDL_GetTicksNS();
 	SDL_GL_SwapWindow(mWindow);
+	uint64_t t_swap = SDL_GetTicksNS();
 	if (flags & MPV_RENDER_UPDATE_FRAME)
+	{
 		mpv_render_context_report_swap(mRender);
+		stat_frames++;
+		stat_video += t_video - t_start;
+		stat_draw += t_draw - t_video;
+		stat_swap += t_swap - t_draw;
+		if (t_swap - t_start > stat_max)
+			stat_max = t_swap - t_start;
+	}
+	if (t_swap - stat_since >= 10 * SDL_NS_PER_SECOND)
+	{
+		if (stat_frames)
+			hal_debug("GLFB::%s: %d video frames in %.1f s, per frame %.1f ms video, %.1f ms OSD and drawing, %.1f ms swap, longest %.1f ms\n",
+				  __func__, stat_frames, (t_swap - stat_since) / 1e9,
+				  stat_video / 1e6 / stat_frames, stat_draw / 1e6 / stat_frames,
+				  stat_swap / 1e6 / stat_frames, stat_max / 1e6);
+		stat_since = t_swap;
+		stat_frames = 0;
+		stat_video = stat_draw = stat_swap = stat_max = 0;
+	}
 
 	GLuint err = glGetError();
 	if (err != 0)

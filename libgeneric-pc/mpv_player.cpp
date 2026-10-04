@@ -369,6 +369,7 @@ cMpvEngine::cMpvEngine()
 	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
 	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0)
 {
+	mStatsTime = 0;
 	mVideo.valid = false;
 	mVideo.w = mVideo.h = 0;
 	mVideo.sw = mVideo.sh = 0;
@@ -512,7 +513,13 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 			{
 				mLiveLock.lock();
 				mTimePos = (p->format == MPV_FORMAT_DOUBLE) ? *(double *)p->data : 0;
+				int64_t now = monotonic_ms();
+				bool due = (p->format == MPV_FORMAT_DOUBLE && now - mStatsTime >= 10000);
+				if (due)
+					mStatsTime = now;
 				mLiveLock.unlock();
+				if (due)
+					playStats();
 			}
 			else if (ev->reply_userdata == 6 && p->format == MPV_FORMAT_DOUBLE)
 				liveClock(*(double *)p->data);
@@ -1119,6 +1126,7 @@ void cMpvEngine::liveStart(const LiveParams &p)
 	mLiveClockTime = 0;
 	mLiveClockTicks = 0;
 	mTimePos = 0;
+	mStatsTime = 0;
 	int serial = ++mLiveSerial;
 	mLiveLock.unlock();
 
@@ -1208,6 +1216,28 @@ int64_t cMpvEngine::livePts()
 	if (mOwner != OWNER_LIVE || mTimePos <= 0)
 		return 0;
 	return (int64_t)(mTimePos * 90000.0) & 0x1ffffffffLL;
+}
+
+/* for whoever watches something with the debug output on: is it shown as
+ * fast as it comes, and where do frames get lost */
+void cMpvEngine::playStats()
+{
+	double fps = 0, shown = 0, display = 0, avsync = 0;
+	int64_t vo_drops = 0, dec_drops = 0, delayed = 0;
+	std::string ao, hwdec;
+
+	getDouble("container-fps", fps);
+	getDouble("estimated-vf-fps", shown);
+	getDouble("display-fps", display);
+	getDouble("avsync", avsync);
+	getInt("frame-drop-count", vo_drops);
+	getInt("decoder-frame-drop-count", dec_drops);
+	getInt("vo-delayed-frame-count", delayed);
+	getString("current-ao", ao);
+	getString("hwdec-current", hwdec);
+	hal_debug("play: %.2f fps, %.2f through the filters, display %.2f Hz, A/V %+.3f s, dropped: %lld decoder, %lld output, %lld late, ao %s, hwdec %s\n",
+		  fps, shown, display, avsync, (long long)dec_drops, (long long)vo_drops, (long long)delayed,
+		  ao.empty() ? "none" : ao.c_str(), hwdec.empty() ? "no" : hwdec.c_str());
 }
 
 /*
