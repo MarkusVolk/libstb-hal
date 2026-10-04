@@ -257,6 +257,9 @@ void GLFramebuffer::run()
 		_exit(1);
 	}
 	SDL_GL_MakeCurrent(glfb_priv->mWindow, glfb_priv->mContext);
+	/* swap in step with the display; on KMS an unthrottled swap queues buffers faster than they are flipped */
+	if (!SDL_GL_SetSwapInterval(1))
+		hal_info("GLFB: SDL_GL_SetSwapInterval: %s\n", SDL_GetError());
 	SDL_HideCursor();
 	/* 32bit FB depth, *2 because tuxtxt uses a shadow buffer */
 	int fbmem = x * y * 4 * 2;
