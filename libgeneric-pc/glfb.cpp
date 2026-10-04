@@ -145,10 +145,6 @@ GLFbPC::~GLFbPC()
 
 void GLFbPC::initKeys()
 {
-	/*
-	   Keep in sync with initKeys() in clutterfb.cpp
-	*/
-
 	mKeyMap[SDLK_UP]    = KEY_UP;
 	mKeyMap[SDLK_DOWN]  = KEY_DOWN;
 	mKeyMap[SDLK_LEFT]  = KEY_LEFT;

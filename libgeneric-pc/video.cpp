@@ -42,12 +42,7 @@ extern "C" {
 /* my own buf 2MB - UHD HEVC I-frames can be very large */
 #define DMX_BUF_SZ 0x200000
 
-#if USE_OPENGL
 #define VDEC_PIXFMT AV_PIX_FMT_RGB32
-#endif
-#if USE_CLUTTER
-#define VDEC_PIXFMT AV_PIX_FMT_BGR24
-#endif
 
 #include "video_lib.h"
 #include "dmx_hal.h"
@@ -931,7 +926,6 @@ void cVideo::run(void)
 				if (vpts != AV_NOPTS_VALUE && vpts >= 0)
 					last_pts = vpts;
 				/* a/v delay - reduced from 400ms/300ms to minimize offset */
-#if USE_OPENGL
 				if (vpts != AV_NOPTS_VALUE && vpts >= 0)
 				{
 					if (v_format == VIDEO_FORMAT_MPEG2)
@@ -939,15 +933,6 @@ void cVideo::run(void)
 					else
 						vpts += 90000 * 15 / 100; /* 150ms */
 				}
-#endif
-#if USE_CLUTTER
-				/* no idea why there's a difference between OpenGL and clutter rendering... */
-				if (vpts != AV_NOPTS_VALUE && vpts >= 0)
-				{
-					if (v_format == VIDEO_FORMAT_MPEG2)
-						vpts += 90000 * 3 / 10; /* 300ms */
-				}
-#endif
 				f->pts(vpts);
 				AVRational a = av_guess_sample_aspect_ratio(avfc, avfc->streams[video_stream_idx], frame);
 				f->AR(a);
@@ -1125,23 +1110,19 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 
 	if (get_video)
 	{
-#if USE_OPENGL //memcpy dont work with copy BGR24 to RGB32
 		if (vid_w != xres || vid_h != yres) /* scale video into data... */
 		{
-#endif
 			bool ret = swscale(&video[0], data, vid_w, vid_h, xres, yres, VDEC_PIXFMT);
 			if (!ret)
 			{
 				free(data);
 				return false;
 			}
-#if USE_OPENGL //memcpy dont work with copy BGR24 to RGB32
 		}
 		else /* get_video and no fancy scaling needed */
 		{
 			memcpy(data, &video[0], xres * yres * sizeof(uint32_t));
 		}
-#endif
 	}
 
 	if (get_osd && (osd_w != xres || osd_h != yres))
