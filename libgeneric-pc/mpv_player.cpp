@@ -366,7 +366,7 @@ void cMpvEngine::shutdown()
 cMpvEngine::cMpvEngine()
 	: mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
 	  mEof(false), mIdle(true), mLastError(0), mOwner(OWNER_NONE), mLiveSerial(0),
-	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0),
+	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
 	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0)
 {
 	mVideo.valid = false;
@@ -686,6 +686,19 @@ void cMpvEngine::updateVideoParams(mpv_node *node)
 		v.sh = nodeInt(nodeMapGet(node, "h"));
 		v.aspect = nodeDouble(nodeMapGet(node, "aspect"));
 		v.valid = v.w > 0 && v.h > 0;
+
+		/* Frames that stay in the decoder's memory (DRM PRIME, as from
+		 * V4L2 on a Raspberry Pi) can only be deinterlaced after copying
+		 * them out, and a software filter on top of that is more than
+		 * such a machine can do at 1080i. Go without for those. */
+		bool zero_copy = nodeString(nodeMapGet(node, "pixelformat")) == "drm_prime";
+		if (v.valid && zero_copy != mNoDeinterlace)
+		{
+			mNoDeinterlace = zero_copy;
+			static const char *no = "no", *automatic = "auto";
+			hal_info("%s: deinterlacing %s\n", __func__, zero_copy ? "off, the frames are DRM PRIME" : "automatic");
+			mpv_set_property_async(mpv, 0, "deinterlace", MPV_FORMAT_STRING, (void *)(zero_copy ? &no : &automatic));
+		}
 	}
 	mVideoLock.lock();
 	v.fps = mVideo.fps;
