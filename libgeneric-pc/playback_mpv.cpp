@@ -187,8 +187,23 @@ bool cPlayback::Start(char *filename, int /*vpid*/, int /*vtype*/, int apid, int
 	first = true;
 	nPlaybackSpeed = 0;
 	if (playing && apid > 0)
-		engine->setInt("aid", apid);
+		SetAPid(apid, false);
 	return playing;
+}
+
+/* neutrino hands over mpv track ids it got from FindAllPids(), but the
+ * PIDs from a recording's .xml for MPEG-TS; map a PID onto its track */
+static int64_t trackForPid(cMpvEngine *engine, const char *type, int pid)
+{
+	std::vector<cMpvEngine::Track> tracks;
+	engine->getTracks(tracks);
+	for (size_t i = 0; i < tracks.size(); i++)
+		if (tracks[i].type == type && tracks[i].id == pid)
+			return pid;
+	for (size_t i = 0; i < tracks.size(); i++)
+		if (tracks[i].type == type && tracks[i].srcId == pid)
+			return tracks[i].id;
+	return -1;
 }
 
 bool cPlayback::SetAPid(int pid, bool /*ac3*/)
@@ -197,7 +212,13 @@ bool cPlayback::SetAPid(int pid, bool /*ac3*/)
 	if (!engine)
 		return false;
 	mAudioStream = pid;
-	return engine->setInt("aid", pid);
+	int64_t id = trackForPid(engine, "audio", pid);
+	if (id < 0)
+	{
+		hal_info("%s: no audio track for %d\n", __func__, pid);
+		return false;
+	}
+	return engine->setInt("aid", id);
 }
 
 bool cPlayback::SetSubtitlePid(int pid)
@@ -430,7 +451,8 @@ bool cPlayback::SelectSubtitles(int pid, std::string charset)
 		engine->setString("sub-codepage", charset);
 	if (pid < 0)
 		return engine->setString("sid", "no");
-	return engine->setInt("sid", pid);
+	int64_t id = trackForPid(engine, "sub", pid);
+	return id >= 0 && engine->setInt("sid", id);
 }
 
 void cPlayback::RequestAbort(void)

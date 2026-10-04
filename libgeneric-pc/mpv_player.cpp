@@ -403,6 +403,9 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 	mStateLock.unlock();
 
 	setFlag("pause", true);
+	/* track selections are options in mpv and would carry over to the next file */
+	setString("aid", "auto");
+	setString("sid", "auto");
 	setStringList(mpv, "http-header-fields", headers);
 	setString("user-agent", userAgent.empty() ? "libmpv" : userAgent);
 	std::vector<std::string> af;
@@ -566,6 +569,7 @@ bool cMpvEngine::getTracks(std::vector<Track> &tracks)
 			const mpv_node *t = &node.u.list->values[i];
 			Track tr;
 			tr.id = nodeInt(nodeMapGet(t, "id"));
+			tr.srcId = nodeInt(nodeMapGet(t, "src-id"), -1);
 			tr.type = nodeString(nodeMapGet(t, "type"));
 			tr.codec = nodeString(nodeMapGet(t, "codec"));
 			tr.lang = nodeString(nodeMapGet(t, "lang"));
