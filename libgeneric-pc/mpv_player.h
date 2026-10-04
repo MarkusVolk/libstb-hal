@@ -64,7 +64,25 @@ class cMpvEngine : public OpenThreads::Thread
 			bool valid;
 			int w; /* display size, aspect ratio applied */
 			int h;
+			int sw; /* size of the coded picture */
+			int sh;
+			double aspect;
 			double fps;
+		};
+		struct AudioParams
+		{
+			std::string codec;
+			int samplerate;
+			int channels;
+		};
+		/* what a live TV session is made of, a PID of 0 means "none" */
+		struct LiveParams
+		{
+			int vpid;
+			int vtype; /* VIDEO_FORMAT */
+			int apid;
+			int atype; /* CZapitAudioChannel::ZapitAudioChannelType */
+			int pcrpid;
 		};
 
 		static cMpvEngine *getInstance(); /* created by hal_api_init() */
@@ -99,6 +117,23 @@ class cMpvEngine : public OpenThreads::Thread
 
 		/* cached by the event thread, read by the GL thread */
 		VideoParams getVideoParams();
+		/* The GL thread brackets every mpv_render_context_render() with these.
+		 * renderBegin() says whether the frame may be drawn: not while the file
+		 * it belongs to is being replaced, its decoder is torn down by then and
+		 * a hardware surface must not be touched any more. */
+		bool renderBegin();
+		void renderEnd();
+		bool getAudioParams(AudioParams &a);
+
+		/* Live TV. The video and the audio decoder report when they are started
+		 * and stopped, the PIDs come from the demuxes zapit has set up. Nothing
+		 * here waits for mpv, a zap must not block. */
+		void liveDecoder(bool video, bool on);
+		bool liveActive();
+		/* presentation time of what is played, in 90 kHz units as in the stream */
+		int64_t livePts();
+		/* for the stream callbacks */
+		bool liveParams(int serial, LiveParams &p);
 
 		void run();
 
@@ -110,6 +145,27 @@ class cMpvEngine : public OpenThreads::Thread
 		void handleLog(mpv_event_log_message *msg);
 		void updateVideoParams(mpv_node *node);
 		int mapError(int error);
+		void liveStart(const LiveParams &p);
+		void liveStop();
+		void renderBlock();
+		bool loadFile(const char *url, const char *options);
+
+		OpenThreads::Mutex mRenderLock;
+		int64_t mWantEntry;	/* playlist entry that was asked for last, 0: none */
+		int64_t mStartedEntry;
+		int64_t mLoadedEntry;
+		void liveClock(double buffered);
+
+		enum Owner { OWNER_NONE, OWNER_PLAYBACK, OWNER_LIVE };
+		OpenThreads::Mutex mLiveLock;
+		Owner mOwner;
+		LiveParams mLive;
+		int mLiveSerial;
+		bool mLiveVideoOn;
+		bool mLiveAudioOn;
+		double mLiveSpeed;
+		int64_t mLiveClockTime;
+		double mTimePos;
 
 		static cMpvEngine *instance;
 		mpv_handle *mpv;

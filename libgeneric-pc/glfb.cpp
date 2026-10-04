@@ -55,6 +55,7 @@
 extern cVideo *videoDecoder;
 extern cAudio *audioDecoder;
 extern int sleep_us;
+extern bool HAL_live_mpv;
 
 /* the private class that does stuff only needed inside libstb-hal.
  * is used e.g. by cVideo... */
@@ -111,6 +112,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mVideoFbo = mVideoTex = 0;
 	mVideoW = mVideoH = 0;
 	mVideoValid = false;
+	mFramePending = false;
 
 	/* linux framebuffer compat mode */
 	si.bits_per_pixel = 32;
@@ -405,8 +407,10 @@ void GLFbPC::pollEvents()
 	SDL_Event ev;
 	/* the software live TV decoder still paces the loop, everything else just waits */
 	int timeout = 250;
-	if (!mVideoValid && videoDecoder)
+	if (!HAL_live_mpv && !mVideoValid && videoDecoder)
 		timeout = sleep_us > 1000 ? sleep_us / 1000 : 1;
+	if (mFramePending)
+		timeout = 5;
 	if (!SDL_WaitEventTimeout(&ev, timeout))
 		return;
 	do
@@ -544,8 +548,34 @@ void GLFbPC::render()
 		vp = engine->getVideoParams();
 	if (!vp.valid)
 		mVideoValid = false;
-	if ((flags & MPV_RENDER_UPDATE_FRAME) && vp.valid)
-		renderVideo(vp);
+	if (flags & MPV_RENDER_UPDATE_FRAME)
+	{
+		bool draw = engine && engine->renderBegin();
+		mFramePending = false;
+		if (draw && vp.valid)
+			renderVideo(vp);
+		else if (draw)
+		{
+			/* the frame is here before its size is: leave it where it is
+			 * and look again in a moment. It may be the only one, of a
+			 * file that was loaded paused. */
+			mFramePending = true;
+		}
+		else if (mRender)
+		{
+			/* a frame of a stream that is being replaced: tell mpv it is
+			 * dealt with, it would wait for it otherwise */
+			int skip = 1;
+			mpv_render_param params[2];
+			params[0].type = MPV_RENDER_PARAM_SKIP_RENDERING;
+			params[0].data = &skip;
+			params[1].type = MPV_RENDER_PARAM_INVALID;
+			params[1].data = NULL;
+			mpv_render_context_render(mRender, params);
+		}
+		if (engine)
+			engine->renderEnd();
+	}
 	if (mVideoValid)
 	{
 		AVRational a;
@@ -864,6 +894,20 @@ void GLFbPC::bltDisplayBuffer()
 	if (!videoDecoder) /* cannot start yet */
 		return;
 	static bool warn = true;
+	static bool still_shown = false;
+	if (HAL_live_mpv && !videoDecoder->stillpicture)
+	{
+		/* this texture only ever holds a still picture then; once that is
+		 * taken down, nothing of it may show up between two channels */
+		if (still_shown)
+		{
+			static const uint32_t black = 0xff000000;
+			glBindTexture(GL_TEXTURE_2D, mState.displaytex);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &black);
+			still_shown = false;
+		}
+		return;
+	}
 	cVideo::SWFramebuffer *buf = videoDecoder->getDecBuf();
 	if (!buf)
 	{
@@ -888,6 +932,9 @@ void GLFbPC::bltDisplayBuffer()
 
 	glBindTexture(GL_TEXTURE_2D, mState.displaytex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, &(*buf)[0]);
+	still_shown = true;
+	if (HAL_live_mpv)
+		return; /* nothing to pace, mpv does its own A/V sync */
 
 	/* "rate control" mechanism starts here...
 	 * this implementation is pretty naive and not working too well, but

@@ -26,13 +26,27 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#include <fcntl.h>
+#include <poll.h>
+#include <time.h>
+
+#include <OpenThreads/ScopedLock>
+
 #include <mpv/client.h>
+#include <mpv/stream_cb.h>
 extern "C" {
 #include <libavutil/error.h>
 }
 
 #include "mpv_player.h"
+#include "dmx_hal.h"
+#include "video_lib.h"
+#include "audio_lib.h"
 #include "hal_debug.h"
+
+extern cVideo *videoDecoder;
+extern cAudio *audioDecoder;
+void hal_live_pids(uint16_t &vpid, uint16_t &apid, uint16_t &pcrpid);
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYER, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_PLAYER, this, args)
@@ -40,9 +54,295 @@ extern "C" {
 #define NEUTRINO_MPV_CONF "/etc/neutrino/mpv.conf"
 
 cMpvEngine *cMpvEngine::instance = NULL;
+static OpenThreads::Mutex instanceLock;
+
+/*
+ * Live TV as a custom stream: tsdmx://<serial>
+ *
+ * The stream is a transport stream demux with the PIDs of the session. zapit
+ * knows the PIDs and what is in them, but the HAL is never told the PMT PID,
+ * so a PAT and a PMT that describe exactly these PIDs are put into the
+ * stream. mpv then knows the codecs without guessing and sees one audio track.
+ */
+#define LIVE_PROTOCOL		"tsdmx"
+#define LIVE_DMX_BUFFER		(4 * 1024 * 1024)
+#define LIVE_PSI_INTERVAL_MS	400
+#define TS_SIZE			188
+
+struct LiveStream
+{
+	cDemux *dmx;
+	int cancel[2];
+	volatile bool cancelled;
+	uint8_t pat[TS_SIZE];
+	uint8_t pmt[TS_SIZE];
+	int cc;
+	int phase;		/* bytes into a transport packet */
+	int64_t psi_time;
+};
+
+static int64_t monotonic_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static uint32_t crc32_mpeg(const uint8_t *data, int len)
+{
+	uint32_t crc = 0xffffffff;
+	for (int i = 0; i < len; i++)
+	{
+		crc ^= (uint32_t)data[i] << 24;
+		for (int k = 0; k < 8; k++)
+			crc = (crc & 0x80000000) ? (crc << 1) ^ 0x04c11db7 : (crc << 1);
+	}
+	return crc;
+}
+
+/* one section in one transport packet */
+static void psi_packet(uint8_t *pkt, int pid, const uint8_t *section, int len)
+{
+	memset(pkt, 0xff, TS_SIZE);
+	pkt[0] = 0x47;
+	pkt[1] = 0x40 | ((pid >> 8) & 0x1f);
+	pkt[2] = pid & 0xff;
+	pkt[3] = 0x10;
+	pkt[4] = 0x00; /* pointer field */
+	memcpy(pkt + 5, section, len);
+}
+
+static int psi_finish(uint8_t *sec, int len)
+{
+	int section_length = len - 3 + 4;
+	sec[1] = (sec[1] & 0xf0) | ((section_length >> 8) & 0x0f);
+	sec[2] = section_length & 0xff;
+	uint32_t crc = crc32_mpeg(sec, len);
+	sec[len++] = crc >> 24;
+	sec[len++] = crc >> 16;
+	sec[len++] = crc >> 8;
+	sec[len++] = crc;
+	return len;
+}
+
+static int es_entry(uint8_t *p, int stream_type, int pid, const uint8_t *desc, int desc_len)
+{
+	p[0] = stream_type;
+	p[1] = 0xe0 | ((pid >> 8) & 0x1f);
+	p[2] = pid & 0xff;
+	p[3] = 0xf0 | ((desc_len >> 8) & 0x0f);
+	p[4] = desc_len & 0xff;
+	if (desc_len)
+		memcpy(p + 5, desc, desc_len);
+	return 5 + desc_len;
+}
+
+static void live_psi(LiveStream *ls, const cMpvEngine::LiveParams &lp)
+{
+	/* any PID that is not in use carries the PMT */
+	int pmt_pid = 0x0020;
+	while (pmt_pid == lp.vpid || pmt_pid == lp.apid || pmt_pid == lp.pcrpid)
+		pmt_pid++;
+
+	uint8_t sec[TS_SIZE];
+	int n = 0;
+	sec[n++] = 0x00;	/* program association section */
+	sec[n++] = 0xb0;
+	sec[n++] = 0x00;
+	sec[n++] = 0x00;	/* transport stream id */
+	sec[n++] = 0x01;
+	sec[n++] = 0xc1;	/* version 0, current */
+	sec[n++] = 0x00;
+	sec[n++] = 0x00;
+	sec[n++] = 0x00;	/* program 1 */
+	sec[n++] = 0x01;
+	sec[n++] = 0xe0 | (pmt_pid >> 8);
+	sec[n++] = pmt_pid & 0xff;
+	n = psi_finish(sec, n);
+	psi_packet(ls->pat, 0, sec, n);
+
+	int pcr = lp.pcrpid ? lp.pcrpid : (lp.vpid ? lp.vpid : 0x1fff);
+	n = 0;
+	sec[n++] = 0x02;	/* program map section */
+	sec[n++] = 0xb0;
+	sec[n++] = 0x00;
+	sec[n++] = 0x00;	/* program 1 */
+	sec[n++] = 0x01;
+	sec[n++] = 0xc1;
+	sec[n++] = 0x00;
+	sec[n++] = 0x00;
+	sec[n++] = 0xe0 | (pcr >> 8);
+	sec[n++] = pcr & 0xff;
+	sec[n++] = 0xf0;	/* no program descriptors */
+	sec[n++] = 0x00;
+	if (lp.vpid)
+	{
+		int st;
+		static const uint8_t vc1[] = { 0x05, 0x04, 'V', 'C', '-', '1' };
+		switch (lp.vtype)
+		{
+			case VIDEO_FORMAT_MPEG4_H264:	st = 0x1b; break;
+			case VIDEO_FORMAT_MPEG4_H265:	st = 0x24; break;
+			case VIDEO_FORMAT_AVS:		st = 0x42; break;
+			case VIDEO_FORMAT_VC1:		st = 0xea; break;
+			default:			st = 0x02; break;
+		}
+		if (lp.vtype == VIDEO_FORMAT_VC1)
+			n += es_entry(sec + n, st, lp.vpid, vc1, sizeof(vc1));
+		else
+			n += es_entry(sec + n, st, lp.vpid, NULL, 0);
+	}
+	if (lp.apid)
+	{
+		/* DVB signals these in a private stream with a descriptor */
+		static const uint8_t ac3[] = { 0x6a, 0x01, 0x00 };
+		static const uint8_t eac3[] = { 0x7a, 0x01, 0x00 };
+		static const uint8_t dts[] = { 0x05, 0x04, 'D', 'T', 'S', '2' };
+		switch (lp.atype)
+		{
+			case 0:		/* AC3 */
+				n += es_entry(sec + n, 0x06, lp.apid, ac3, sizeof(ac3));
+				break;
+			case 0x22:	/* EAC3 */
+				n += es_entry(sec + n, 0x06, lp.apid, eac3, sizeof(eac3));
+				break;
+			case 2:		/* DTS */
+			case 0x10:	/* DTSHD */
+				n += es_entry(sec + n, 0x06, lp.apid, dts, sizeof(dts));
+				break;
+			case 8:		/* AAC, ADTS */
+				n += es_entry(sec + n, 0x0f, lp.apid, NULL, 0);
+				break;
+			case 9:		/* AAC, LATM */
+				n += es_entry(sec + n, 0x11, lp.apid, NULL, 0);
+				break;
+			default:	/* MPEG */
+				n += es_entry(sec + n, 0x04, lp.apid, NULL, 0);
+				break;
+		}
+	}
+	n = psi_finish(sec, n);
+	psi_packet(ls->pmt, pmt_pid, sec, n);
+}
+
+static int64_t live_read(void *cookie, char *buf, uint64_t nbytes)
+{
+	LiveStream *ls = (LiveStream *)cookie;
+
+	/* the tables go in between two packets, first of all and then again and again */
+	int64_t now = monotonic_ms();
+	if (ls->phase == 0 && nbytes >= 2 * TS_SIZE && (ls->psi_time == 0 || now - ls->psi_time >= LIVE_PSI_INTERVAL_MS))
+	{
+		ls->psi_time = now;
+		ls->pat[3] = 0x10 | ls->cc;
+		ls->pmt[3] = 0x10 | ls->cc;
+		ls->cc = (ls->cc + 1) & 0x0f;
+		memcpy(buf, ls->pat, TS_SIZE);
+		memcpy(buf + TS_SIZE, ls->pmt, TS_SIZE);
+		return 2 * TS_SIZE;
+	}
+
+	size_t want = nbytes;
+	if (ls->phase == 0 && want > TS_SIZE)
+		want -= want % TS_SIZE;
+
+	struct pollfd pfd[2];
+	pfd[0].fd = ls->dmx->getFD();
+	pfd[0].events = POLLIN;
+	pfd[1].fd = ls->cancel[0];
+	pfd[1].events = POLLIN;
+	while (!ls->cancelled)
+	{
+		pfd[0].revents = pfd[1].revents = 0;
+		int r = poll(pfd, 2, 1000);
+		if (ls->cancelled || (pfd[1].revents & POLLIN))
+			break;
+		if (r <= 0)
+			continue; /* no signal, no data: keep waiting, a cancel ends it */
+		ssize_t n = read(pfd[0].fd, buf, want);
+		if (n > 0)
+		{
+			ls->phase = (ls->phase + n) % TS_SIZE;
+			return n;
+		}
+		/* EOVERFLOW: the demux buffer ran over and was flushed, go on */
+		if (n < 0 && errno != EAGAIN && errno != EINTR && errno != EOVERFLOW)
+			return -1;
+		if (n == 0 || (pfd[0].revents & (POLLHUP | POLLNVAL)))
+			usleep(10000);
+	}
+	return 0;
+}
+
+static void live_close(void *cookie)
+{
+	LiveStream *ls = (LiveStream *)cookie;
+	delete ls->dmx;
+	close(ls->cancel[0]);
+	close(ls->cancel[1]);
+	delete ls;
+}
+
+static void live_cancel(void *cookie)
+{
+	LiveStream *ls = (LiveStream *)cookie;
+	ls->cancelled = true;
+	if (write(ls->cancel[1], "x", 1) < 0)
+		; /* the flag is enough once the poll times out */
+}
+
+static int live_open(void *user_data, char *uri, mpv_stream_cb_info *info)
+{
+	cMpvEngine *engine = (cMpvEngine *)user_data;
+	cMpvEngine::LiveParams lp;
+	const char *serial = strstr(uri, "://");
+	if (!serial || !engine->liveParams(atoi(serial + 3), lp))
+		return MPV_ERROR_LOADING_FAILED; /* a zap has overtaken this one */
+
+	LiveStream *ls = new LiveStream;
+	ls->cancelled = false;
+	ls->cc = 0;
+	ls->phase = 0;
+	ls->psi_time = 0;
+	if (pipe2(ls->cancel, O_CLOEXEC | O_NONBLOCK) < 0)
+	{
+		delete ls;
+		return MPV_ERROR_LOADING_FAILED;
+	}
+	live_psi(ls, lp);
+
+	int pids[3] = { lp.vpid, lp.apid, lp.pcrpid };
+	bool ok = false;
+	ls->dmx = new cDemux(0);
+	if (ls->dmx->Open(DMX_TP_CHANNEL, NULL, LIVE_DMX_BUFFER))
+	{
+		bool first = true;
+		ok = true;
+		for (int i = 0; i < 3 && ok; i++)
+		{
+			if (!pids[i] || (i > 0 && pids[i] == pids[0]) || (i > 1 && pids[i] == pids[1]))
+				continue;
+			ok = first ? ls->dmx->pesFilter(pids[i]) : ls->dmx->addPid(pids[i]);
+			first = false;
+		}
+		ok = ok && !first && ls->dmx->Start();
+	}
+	if (!ok)
+	{
+		live_close(ls);
+		return MPV_ERROR_LOADING_FAILED;
+	}
+
+	info->cookie = ls;
+	info->read_fn = live_read;
+	info->close_fn = live_close;
+	info->cancel_fn = live_cancel;
+	return 0;
+}
 
 cMpvEngine *cMpvEngine::getInstance()
 {
+	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(instanceLock);
 	if (!instance)
 	{
 		cMpvEngine *e = new cMpvEngine();
@@ -58,17 +358,23 @@ cMpvEngine *cMpvEngine::getInstance()
 
 void cMpvEngine::shutdown()
 {
+	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(instanceLock);
 	delete instance;
 	instance = NULL;
 }
 
 cMpvEngine::cMpvEngine()
 	: mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
-	  mEof(false), mIdle(true), mLastError(0)
+	  mEof(false), mIdle(true), mLastError(0), mOwner(OWNER_NONE), mLiveSerial(0),
+	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveClockTime(0), mTimePos(0),
+	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0)
 {
 	mVideo.valid = false;
 	mVideo.w = mVideo.h = 0;
+	mVideo.sw = mVideo.sh = 0;
+	mVideo.aspect = 0;
 	mVideo.fps = 0;
+	memset(&mLive, 0, sizeof(mLive));
 
 	mpv_handle *h = mpv_create();
 	if (!h)
@@ -87,6 +393,8 @@ cMpvEngine::cMpvEngine()
 	mpv_set_option_string(h, "terminal", "no");
 	mpv_set_option_string(h, "ytdl", "no");
 	mpv_set_option_string(h, "hwdec", "auto-safe");
+	/* only touches what is flagged as interlaced: TV and recordings of it */
+	mpv_set_option_string(h, "deinterlace", "auto");
 	mpv_set_option_string(h, "demuxer-max-bytes", "64MiB");
 	mpv_set_option_string(h, "demuxer-max-back-bytes", "16MiB");
 	mpv_set_option_string(h, "audio-client-name", "neutrino");
@@ -110,6 +418,11 @@ cMpvEngine::cMpvEngine()
 	mpv_observe_property(h, 2, "container-fps", MPV_FORMAT_DOUBLE);
 	mpv_observe_property(h, 3, "eof-reached", MPV_FORMAT_FLAG);
 	mpv_observe_property(h, 4, "idle-active", MPV_FORMAT_FLAG);
+	mpv_observe_property(h, 5, "time-pos", MPV_FORMAT_DOUBLE);
+	mpv_observe_property(h, 6, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
+	r = mpv_stream_cb_add_ro(h, LIVE_PROTOCOL, this, live_open);
+	if (r < 0)
+		hal_info("%s: no live TV, mpv_stream_cb_add_ro: %s\n", __func__, mpv_error_string(r));
 	mpv = h;
 	hal_info("%s: libmpv %s\n", __func__, mpv_get_property_string(h, "mpv-version") ? : "");
 	start();
@@ -145,6 +458,9 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 	switch (ev->event_id)
 	{
 		case MPV_EVENT_START_FILE:
+			mRenderLock.lock();
+			mStartedEntry = ((mpv_event_start_file *)ev->data)->playlist_entry_id;
+			mRenderLock.unlock();
 			mStateLock.lock();
 			mFailed = false;
 			mEof = false;
@@ -152,6 +468,9 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 			break;
 		case MPV_EVENT_FILE_LOADED:
 			hal_debug("%s: file loaded\n", __func__);
+			mRenderLock.lock();
+			mLoadedEntry = mStartedEntry;
+			mRenderLock.unlock();
 			mStateLock.lock();
 			mLoaded = true;
 			mStateCond.broadcast();
@@ -186,6 +505,14 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 				mIdle = *(int *)p->data;
 				mStateLock.unlock();
 			}
+			else if (ev->reply_userdata == 5)
+			{
+				mLiveLock.lock();
+				mTimePos = (p->format == MPV_FORMAT_DOUBLE) ? *(double *)p->data : 0;
+				mLiveLock.unlock();
+			}
+			else if (ev->reply_userdata == 6 && p->format == MPV_FORMAT_DOUBLE)
+				liveClock(*(double *)p->data);
 			break;
 		}
 		default:
@@ -346,10 +673,15 @@ void cMpvEngine::updateVideoParams(mpv_node *node)
 	VideoParams v;
 	v.valid = false;
 	v.w = v.h = 0;
+	v.sw = v.sh = 0;
+	v.aspect = 0;
 	if (node && node->format == MPV_FORMAT_NODE_MAP)
 	{
 		v.w = nodeInt(nodeMapGet(node, "dw"));
 		v.h = nodeInt(nodeMapGet(node, "dh"));
+		v.sw = nodeInt(nodeMapGet(node, "w"));
+		v.sh = nodeInt(nodeMapGet(node, "h"));
+		v.aspect = nodeDouble(nodeMapGet(node, "aspect"));
 		v.valid = v.w > 0 && v.h > 0;
 	}
 	mVideoLock.lock();
@@ -392,6 +724,14 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 		      const std::string &userAgent, const std::string &audioFile, double start)
 {
 	hal_info("%s: %s%s\n", __func__, url.c_str(), audioFile.empty() ? "" : " (+audio file)");
+	/* a file takes the player away from live TV, a live session that is
+	 * still on its way to mpv is not opened any more */
+	mLiveLock.lock();
+	mOwner = OWNER_PLAYBACK;
+	mLiveSerial++;
+	mLiveSpeed = 1.0;
+	mLiveLock.unlock();
+	setDouble("speed", 1.0);
 	mStateLock.lock();
 	mLoaded = false;
 	mFailed = false;
@@ -421,8 +761,7 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 	else
 		setString("start", "none");
 
-	const char *cmd[] = { "loadfile", url.c_str(), "replace", NULL };
-	if (!command(cmd))
+	if (!loadFile(url.c_str(), NULL))
 		return false;
 
 	mStateLock.lock();
@@ -448,19 +787,74 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 	return ok;
 }
 
+/* stop() and abort() are the file player's, they leave a live session alone */
 void cMpvEngine::stop()
 {
+	mLiveLock.lock();
+	bool live = (mOwner == OWNER_LIVE);
+	if (!live)
+		mOwner = OWNER_NONE;
+	mLiveLock.unlock();
+	if (live)
+		return;
+	renderBlock();
 	const char *cmd[] = { "stop", NULL };
 	command(cmd);
+}
+
+/* no frame of the current file is drawn from here on; waits for a frame that
+ * is being drawn right now */
+void cMpvEngine::renderBlock()
+{
+	mRenderLock.lock();
+	mWantEntry = 0;
+	mRenderLock.unlock();
+}
+
+bool cMpvEngine::renderBegin()
+{
+	mRenderLock.lock();
+	return mWantEntry > 0 && mLoadedEntry == mWantEntry;
+}
+
+void cMpvEngine::renderEnd()
+{
+	mRenderLock.unlock();
+}
+
+/* "loadfile <url> replace", with the frames of what is replaced locked out */
+bool cMpvEngine::loadFile(const char *url, const char *options)
+{
+	renderBlock();
+	const char *cmd[] = { "loadfile", url, "replace", options ? "-1" : NULL, options, NULL };
+	mpv_node res;
+	int r = mpv_command_ret(mpv, cmd, &res);
+	if (r < 0)
+	{
+		hal_info("%s: loadfile: %s\n", __func__, mpv_error_string(r));
+		return false;
+	}
+	int64_t entry = nodeInt(nodeMapGet(&res, "playlist_entry_id"));
+	mpv_free_node_contents(&res);
+	mRenderLock.lock();
+	mWantEntry = entry;
+	mRenderLock.unlock();
+	return true;
 }
 
 void cMpvEngine::abort()
 {
 	hal_info("%s\n", __func__);
+	mLiveLock.lock();
+	bool live = (mOwner == OWNER_LIVE);
+	mLiveLock.unlock();
+	if (live)
+		return;
 	mStateLock.lock();
 	mAborted = true;
 	mStateCond.broadcast();
 	mStateLock.unlock();
+	renderBlock();
 	const char *cmd[] = { "stop", NULL };
 	mpv_command_async(mpv, 0, cmd);
 }
@@ -639,4 +1033,202 @@ bool cMpvEngine::getMetadata(std::map<std::string, std::string> &meta)
 	}
 	mpv_free_node_contents(&node);
 	return true;
+}
+
+bool cMpvEngine::getAudioParams(AudioParams &a)
+{
+	a.codec.clear();
+	a.samplerate = 0;
+	a.channels = 0;
+	if (!getString("audio-codec-name", a.codec))
+		return false;
+	mpv_node node;
+	if (mpv_get_property(mpv, "audio-params", MPV_FORMAT_NODE, &node) < 0)
+		return true;
+	a.samplerate = nodeInt(nodeMapGet(&node, "samplerate"));
+	a.channels = nodeInt(nodeMapGet(&node, "channel-count"));
+	mpv_free_node_contents(&node);
+	return true;
+}
+
+/*
+ * zapit sets the PID filters of the video, audio and PCR demux first and
+ * then starts the audio and the video decoder one after the other. So the
+ * first decoder that starts already finds every PID of the channel, and the
+ * second one finds the session it needs running. A radio channel only ever
+ * starts the audio decoder. Changing the audio track stops and starts the
+ * audio decoder alone, with a new PID: the session is loaded again.
+ */
+void cMpvEngine::liveDecoder(bool video, bool on)
+{
+	mLiveLock.lock();
+	if (video)
+		mLiveVideoOn = on;
+	else
+		mLiveAudioOn = on;
+	bool any = mLiveVideoOn || mLiveAudioOn;
+	mLiveLock.unlock();
+
+	if (!on)
+	{
+		if (!any)
+			liveStop();
+		return;
+	}
+
+	uint16_t vpid, apid, pcrpid;
+	hal_live_pids(vpid, apid, pcrpid);
+	LiveParams p;
+	p.vpid = vpid;
+	p.apid = apid;
+	p.pcrpid = pcrpid;
+	p.vtype = videoDecoder ? videoDecoder->GetStreamType() : 0;
+	p.atype = audioDecoder ? audioDecoder->GetStreamType() : 0;
+	if (!p.vpid && !p.apid)
+		return;
+	liveStart(p);
+}
+
+void cMpvEngine::liveStart(const LiveParams &p)
+{
+	mLiveLock.lock();
+	if (mOwner == OWNER_LIVE && !memcmp(&mLive, &p, sizeof(p)))
+	{
+		mLiveLock.unlock();
+		return;
+	}
+	mLive = p;
+	mOwner = OWNER_LIVE;
+	mLiveSpeed = 1.0;
+	mLiveClockTime = 0;
+	mTimePos = 0;
+	int serial = ++mLiveSerial;
+	mLiveLock.unlock();
+
+	hal_info("%s: #%d vpid 0x%04x (type %d) apid 0x%04x (type %d) pcr 0x%04x\n", __func__,
+		 serial, p.vpid, p.vtype, p.apid, p.atype, p.pcrpid);
+
+	mStateLock.lock();
+	mLoaded = false;
+	mFailed = false;
+	mAborted = false;
+	mEof = false;
+	mLastError = 0;
+	mLastErrorMsg.clear();
+	mLastLogLine.clear();
+	mStateLock.unlock();
+
+	/* what a file may have left behind */
+	static const char *reset[][2] =
+	{
+		{ "pause", "no" }, { "speed", "1.0" }, { "aid", "auto" }, { "sid", "auto" }, { "start", "none" }
+	};
+	for (size_t i = 0; i < sizeof(reset) / sizeof(reset[0]); i++)
+		mpv_set_property_async(mpv, 0, reset[i][0], MPV_FORMAT_STRING, (void *)&reset[i][1]);
+	std::vector<std::string> none;
+	setStringList(mpv, "audio-files", none);
+	setStringList(mpv, "http-header-fields", none);
+
+	/* these only hold for the live stream, [protocol.tsdmx] in mpv.conf can
+	 * override them per machine */
+	const char *options =
+		"demuxer-lavf-format=mpegts,"
+		"rebase-start-time=no,"		/* time-pos is the PTS of the stream */
+		"keep-open=no,"
+		"cache=yes,"
+		"cache-pause=no,"
+		"demuxer-max-back-bytes=0,"
+		"demuxer-lavf-analyzeduration=0.4,"
+		"demuxer-lavf-probesize=524288,"
+		"video-sync=audio,"
+		"interpolation=no,"
+		"audio-pitch-correction=no";	/* the clock is tuned by fractions of a percent */
+	char url[32];
+	snprintf(url, sizeof(url), LIVE_PROTOCOL "://%d", serial);
+	loadFile(url, options);
+}
+
+void cMpvEngine::liveStop()
+{
+	mLiveLock.lock();
+	bool live = (mOwner == OWNER_LIVE);
+	if (live)
+	{
+		mOwner = OWNER_NONE;
+		mLiveSerial++;
+		mTimePos = 0;
+		memset(&mLive, 0, sizeof(mLive));
+	}
+	mLiveLock.unlock();
+	if (!live)
+		return;
+	hal_info("%s\n", __func__);
+	renderBlock();
+	const char *cmd[] = { "stop", NULL };
+	mpv_command_async(mpv, 0, cmd);
+	static const char *one = "1.0";
+	mpv_set_property_async(mpv, 0, "speed", MPV_FORMAT_STRING, (void *)&one);
+}
+
+bool cMpvEngine::liveParams(int serial, LiveParams &p)
+{
+	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(mLiveLock);
+	if (mOwner != OWNER_LIVE || serial != mLiveSerial)
+		return false;
+	p = mLive;
+	return true;
+}
+
+bool cMpvEngine::liveActive()
+{
+	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(mLiveLock);
+	return mOwner == OWNER_LIVE;
+}
+
+int64_t cMpvEngine::livePts()
+{
+	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(mLiveLock);
+	if (mOwner != OWNER_LIVE || mTimePos <= 0)
+		return 0;
+	return (int64_t)(mTimePos * 90000.0) & 0x1ffffffffLL;
+}
+
+/*
+ * The sender's clock and ours are not the same one. Without correction the
+ * buffer either runs dry or runs over, sooner or later. Keep about half a
+ * second in it by playing a tiny bit slower or faster.
+ */
+void cMpvEngine::liveClock(double buffered)
+{
+	static const double target = 0.5, deadband = 0.15, limit = 0.01;
+
+	mLiveLock.lock();
+	bool live = (mOwner == OWNER_LIVE);
+	int64_t now = monotonic_ms();
+	bool due = (now - mLiveClockTime >= 1000);
+	if (live && due)
+		mLiveClockTime = now;
+	double old = mLiveSpeed;
+	mLiveLock.unlock();
+	if (!live || !due)
+		return;
+
+	double err = buffered - target;
+	double speed = 1.0;
+	if (err > deadband || err < -deadband)
+	{
+		speed = 1.0 + 0.02 * err;
+		if (speed > 1.0 + limit)
+			speed = 1.0 + limit;
+		if (speed < 1.0 - limit)
+			speed = 1.0 - limit;
+	}
+	if (speed > old - 0.0005 && speed < old + 0.0005)
+		return;
+
+	mLiveLock.lock();
+	mLiveSpeed = speed;
+	mLiveLock.unlock();
+	hal_debug("%s: %.2f s buffered, speed %.4f\n", __func__, buffered, speed);
+	mpv_set_property_async(mpv, 0, "speed", MPV_FORMAT_DOUBLE, &speed);
 }

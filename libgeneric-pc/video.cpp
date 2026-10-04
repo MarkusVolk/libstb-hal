@@ -47,7 +47,10 @@ extern "C" {
 #include "video_lib.h"
 #include "dmx_hal.h"
 #include "glfb_priv.h"
+#include "mpv_player.h"
 #include "hal_debug.h"
+
+#include <mpv/client.h>
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_VIDEO, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_VIDEO, this, args)
 #define hal_info_c(args...) _hal_info(HAL_DEBUG_VIDEO, NULL, args)
@@ -58,6 +61,9 @@ extern GLFbPC *glfb_priv;
 int system_rev = 0;
 
 extern bool HAL_nodec;
+extern bool HAL_live_mpv;
+/* for the read callback of the software decoder, which has no object */
+static volatile bool decoder_running = false;
 
 static uint8_t *dmxbuf;
 static int bufpos;
@@ -162,14 +168,28 @@ int cVideo::getAspectRatio(void)
 	int ret = 0;
 	int w, h, ar;
 	AVRational a;
-	if (buf_num == 0)
-		goto out;
-	a = buffers[buf_out].AR();
-	w = buffers[buf_out].width();
-	h = buffers[buf_out].height();
-	if (a.den == 0 || h == 0)
-		goto out;
-	ar = w * 100 * a.num / h / a.den;
+	if (HAL_live_mpv)
+	{
+		cMpvEngine *engine = cMpvEngine::getInstance();
+		cMpvEngine::VideoParams vp;
+		vp.valid = false;
+		if (engine)
+			vp = engine->getVideoParams();
+		if (!vp.valid || vp.aspect <= 0)
+			goto out;
+		ar = (int)(vp.aspect * 100);
+	}
+	else
+	{
+		if (buf_num == 0)
+			goto out;
+		a = buffers[buf_out].AR();
+		w = buffers[buf_out].width();
+		h = buffers[buf_out].height();
+		if (a.den == 0 || h == 0)
+			goto out;
+		ar = w * 100 * a.num / h / a.den;
+	}
 	if (ar < 100 || ar > 225) /* < 4:3, > 20:9 */
 		; /* ret = 0: N/A */
 	else if (ar < 140) /* 4:3 */
@@ -190,14 +210,40 @@ int cVideo::setCroppingMode(int)
 	return 0;
 }
 
+/* size and rate of the picture mpv is playing, where the software decoder kept its own */
+void cVideo::liveInfo(void)
+{
+	if (!HAL_live_mpv)
+		return;
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	cMpvEngine::VideoParams vp;
+	vp.valid = false;
+	if (engine)
+		vp = engine->getVideoParams();
+	dec_w = vp.valid ? vp.sw : 0;
+	dec_h = vp.valid ? vp.sh : 0;
+	dec_r = vp.valid ? (int)(vp.fps + 0.01) : 0;
+}
+
 int cVideo::Start(void *, unsigned short, unsigned short, void *)
 {
 	hal_debug("%s running %d >\n", __func__, thread_running);
+	if (HAL_live_mpv)
+	{
+		cMpvEngine *engine = cMpvEngine::getInstance();
+		if (engine && !HAL_nodec)
+			engine->liveDecoder(true, true);
+		return 0;
+	}
 	if (!thread_running && !HAL_nodec)
 	{
 		thread_running = true;
+		decoder_running = true;
 		if (OpenThreads::Thread::start() != 0)
+		{
 			thread_running = false;
+			decoder_running = false;
+		}
 	}
 	hal_debug("%s running %d <\n", __func__, thread_running);
 	return 0;
@@ -206,9 +252,17 @@ int cVideo::Start(void *, unsigned short, unsigned short, void *)
 int cVideo::Stop(bool)
 {
 	hal_debug("%s running %d >\n", __func__, thread_running);
+	if (HAL_live_mpv)
+	{
+		cMpvEngine *engine = cMpvEngine::getInstance();
+		if (engine)
+			engine->liveDecoder(true, false);
+		return 0;
+	}
 	if (thread_running)
 	{
 		thread_running = false;
+		decoder_running = false;
 		OpenThreads::Thread::join();
 	}
 	hal_debug("%s running %d <\n", __func__, thread_running);
@@ -223,6 +277,8 @@ int cVideo::setBlank(int)
 int cVideo::GetVideoSystem()
 {
 	int current_video_system = VIDEO_STD_1080I50;
+
+	liveInfo();
 
 	if (dec_w < 720)
 		current_video_system = VIDEO_STD_PAL;
@@ -483,6 +539,7 @@ void cVideo::Pig(int x, int y, int w, int h, int /*osd_w*/, int /*osd_h*/, int /
 
 void cVideo::getPictureInfo(int &width, int &height, int &rate)
 {
+	liveInfo();
 	width = dec_w;
 	height = dec_h;
 	switch (dec_r)
@@ -550,6 +607,9 @@ static int my_read(void *, uint8_t *buf, int buf_size)
 			int ret = videoDemux->Read(dmxbuf + bufpos, DMX_BUF_SZ - bufpos, 20);
 			if (ret > 0)
 				bufpos += ret;
+			/* a stop must not wait for all the retries */
+			if (!decoder_running)
+				break;
 		}
 	}
 	if (bufpos == 0)
@@ -1078,7 +1138,68 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 	int osd_h = glfb_priv->getOSDHeight();
 	xres = osd_w;
 	yres = osd_h;
-	if (get_video)
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	if (get_video && engine && engine->getVideoParams().valid)
+	{
+		/* mpv has the picture: ask it for the frame, scaled to its display
+		 * size. It comes as bgr0, which is this buffer's RGB32 without alpha. */
+		mpv_node res;
+		mpv_node args[2];
+		args[0].format = MPV_FORMAT_STRING;
+		args[0].u.string = (char *)"screenshot-raw";
+		args[1].format = MPV_FORMAT_STRING;
+		args[1].u.string = (char *)"video";
+		mpv_node_list list;
+		list.num = 2;
+		list.values = args;
+		list.keys = NULL;
+		mpv_node cmd;
+		cmd.format = MPV_FORMAT_NODE_ARRAY;
+		cmd.u.list = &list;
+		if (mpv_command_node(engine->getHandle(), &cmd, &res) >= 0)
+		{
+			int64_t w = 0, h = 0, stride = 0;
+			mpv_byte_array *ba = NULL;
+			if (res.format == MPV_FORMAT_NODE_MAP)
+			{
+				for (int i = 0; i < res.u.list->num; i++)
+				{
+					const char *key = res.u.list->keys[i];
+					mpv_node *v = &res.u.list->values[i];
+					if (!strcmp(key, "w") && v->format == MPV_FORMAT_INT64)
+						w = v->u.int64;
+					else if (!strcmp(key, "h") && v->format == MPV_FORMAT_INT64)
+						h = v->u.int64;
+					else if (!strcmp(key, "stride") && v->format == MPV_FORMAT_INT64)
+						stride = v->u.int64;
+					else if (!strcmp(key, "data") && v->format == MPV_FORMAT_BYTE_ARRAY)
+						ba = v->u.ba;
+				}
+			}
+			if (ba && w > 0 && h > 0 && stride >= w * 4 && (int64_t)ba->size >= stride * h)
+			{
+				video.resize(w * h * 4);
+				video.width(w);
+				video.height(h);
+				for (int64_t y = 0; y < h; y++)
+				{
+					uint32_t *dst = (uint32_t *)&video[y * w * 4];
+					memcpy(dst, (uint8_t *)ba->data + y * stride, w * 4);
+					for (int64_t x = 0; x < w; x++)
+						dst[x] |= 0xff000000;
+				}
+			}
+			mpv_free_node_contents(&res);
+		}
+		vid_w = video.width();
+		vid_h = video.height();
+		if (scale_to_video || !get_osd)
+		{
+			xres = vid_w;
+			yres = vid_h;
+		}
+	}
+	else if (get_video)
 	{
 		buf_m.lock();
 		video = buffers[buf_out];
@@ -1177,6 +1298,11 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 int64_t cVideo::GetPTS(void)
 {
 	int64_t pts = 0;
+	if (HAL_live_mpv)
+	{
+		cMpvEngine *engine = cMpvEngine::getInstance();
+		return engine ? engine->livePts() : 0;
+	}
 	buf_m.lock();
 	if (buf_num != 0)
 		pts = buffers[buf_out].pts();

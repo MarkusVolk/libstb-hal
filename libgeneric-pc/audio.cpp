@@ -55,6 +55,7 @@ static uint8_t *dmxbuf = NULL;
 static int bufpos;
 
 extern bool HAL_nodec;
+extern bool HAL_live_mpv;
 
 static cAudio *gThiz = NULL;
 
@@ -190,8 +191,21 @@ int cAudio::setVolume(unsigned int left, unsigned int right)
 int cAudio::Start(void)
 {
 	hal_debug("%s >\n", __func__);
-	if (! HAL_nodec)
-		OpenThreads::Thread::start();
+	if (HAL_live_mpv)
+	{
+		cMpvEngine *e = cMpvEngine::getInstance();
+		if (e && !HAL_nodec)
+			e->liveDecoder(false, true);
+		return 0;
+	}
+	/* set here, not by the thread: a stop that comes before the thread got
+	 * that far would not join it */
+	if (!HAL_nodec && !thread_started)
+	{
+		thread_started = true;
+		if (OpenThreads::Thread::start() != 0)
+			thread_started = false;
+	}
 	hal_debug("%s <\n", __func__);
 	return 0;
 }
@@ -199,6 +213,13 @@ int cAudio::Start(void)
 int cAudio::Stop(void)
 {
 	hal_debug("%s >\n", __func__);
+	if (HAL_live_mpv)
+	{
+		cMpvEngine *e = cMpvEngine::getInstance();
+		if (e)
+			e->liveDecoder(false, false);
+		return 0;
+	}
 	if (thread_started)
 	{
 		thread_started = false;
@@ -279,6 +300,37 @@ void cAudio::getAudioInfo(int &type, int &layer, int &freq, int &bitrate, int &m
 	freq = 0;
 	bitrate = 0; /* not used, but easy to get :-) */
 	mode = 0; /* default: stereo */
+	if (HAL_live_mpv)
+	{
+		cMpvEngine *e = cMpvEngine::getInstance();
+		cMpvEngine::AudioParams a;
+		if (!e || !e->getAudioParams(a))
+			return;
+		if (a.codec == "mp2" || a.codec == "mp1")
+			type = AUDIO_FMT_MPEG;
+		else if (a.codec == "mp3")
+			type = AUDIO_FMT_MP3;
+		else if (a.codec == "ac3" || a.codec == "truehd")
+			type = AUDIO_FMT_DOLBY_DIGITAL;
+		else if (a.codec == "eac3")
+			type = AUDIO_FMT_DD_PLUS;
+		else if (a.codec == "aac" || a.codec == "aac_latm")
+			type = AUDIO_FMT_AAC;
+		else if (a.codec == "dts")
+			type = AUDIO_FMT_DTS;
+		freq = a.samplerate;
+		switch (a.channels)
+		{
+			case 1:  mode = (type == AUDIO_FMT_MPEG) ? 3 : 1; break;
+			case 2:  mode = (type == AUDIO_FMT_MPEG) ? 0 : 2; break;
+			case 3:  mode = 3; break;
+			case 4:  mode = 6; break;
+			case 5:
+			case 6:  mode = 7; break;
+			default: break;
+		}
+		return;
+	}
 	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(c_mutex);
 	hal_debug("cAudio::getAudioInfo c %p\n", c);
 	if (c)
@@ -488,7 +540,6 @@ void cAudio::run()
 	avfc->pb = pIOCtx;
 	avfc->iformat = inp;
 	avfc->probesize = 188 * 100;
-	thread_started = true;
 
 	if (avformat_open_input(&avfc, NULL, inp, NULL) < 0)
 	{
