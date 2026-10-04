@@ -22,6 +22,7 @@
 
 #ifndef __glfb_priv__
 #define __glfb_priv__
+#include <stdint.h>
 #include <OpenThreads/Mutex>
 #include <vector>
 #include <map>
@@ -34,6 +35,8 @@
 #include <clutter/clutter.h>
 #endif
 #include "glfb.h"
+#include "mpv_player.h"
+struct mpv_render_context;
 extern "C" {
 #include <libavutil/rational.h>
 }
@@ -58,6 +61,9 @@ class GLFbPC
 		void blit()
 		{
 			mState.blit = true;
+#if USE_OPENGL
+			wake();
+#endif
 		};
 		fb_var_screeninfo getScreenInfo()
 		{
@@ -100,6 +106,15 @@ class GLFbPC
 		std::map<SDL_Keycode, int> mKeyMap;
 		SDL_Window *mWindow;
 		SDL_GLContext mContext;
+		uint32_t mUserEvent; /* wakes the GL thread: blit() and mpv frames */
+		int mViewX; /* viewport offset in fullscreen mode */
+		int mViewY;
+		mpv_render_context *mRender;
+		GLuint mVideoFbo; /* mpv renders the video into this FBO ... */
+		GLuint mVideoTex; /* ... whose texture is drawn below the OSD */
+		int mVideoW;
+		int mVideoH;
+		bool mVideoValid; /* mpv has drawn a frame since the last video-params change */
 #endif
 #if USE_CLUTTER
 		std::map<int, int> mKeyMap;
@@ -110,9 +125,14 @@ class GLFbPC
 
 		void render(); /* actual render function */
 #if USE_OPENGL
-		void pollEvents(); /* SDL window and keyboard events */
+		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
 		void handleKey(const SDL_KeyboardEvent &ev);
-		void checkReinit(int w, int h); /* e.g. in case window was resized */
+		void wake();
+		bool setupRender(); /* the libmpv render context, needs the GL context */
+		void teardownRender();
+		void renderVideo(const cMpvEngine::VideoParams &vp);
+		void restoreGLState();
+		static void renderUpdateCb(void *ctx);
 		bool setupGLObjects(); /* shaders, textures and stuff */
 		void releaseGLObjects();
 		void drawSquare(float size, float x_factor = 1); /* do not be square */
@@ -137,6 +157,7 @@ class GLFbPC
 			GLint a_tex; /* vertex attribute: texture coordinate */
 			GLint u_scale; /* uniform: zoom / aspect scaling */
 			GLint u_xproj; /* uniform: orthographic x scaling */
+			GLint u_bgra; /* uniform: 1 swizzles the BGRA CPU buffers, 0 for the mpv texture */
 			float xproj;
 #endif
 		} mState;

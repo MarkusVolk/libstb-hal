@@ -23,6 +23,7 @@
 #include <cstdlib>
 
 #include "audio_lib.h"
+#include "mpv_player.h"
 #include "dmx_hal.h"
 #include "hal_debug.h"
 
@@ -107,12 +108,21 @@ void cAudio::closeDevice(void)
 int cAudio::do_mute(bool enable, bool remember)
 {
 	hal_debug("%s(%d, %d)\n", __func__, enable, remember);
+	if (remember)
+		Muted = enable;
+	cMpvEngine *e = cMpvEngine::getInstance();
+	if (e)
+		e->setFlag("mute", enable);
 	return 0;
 }
 
 int cAudio::setVolume(unsigned int left, unsigned int right)
 {
 	hal_debug("%s(%d, %d)\n", __func__, left, right);
+	volume = (left + right) / 2;
+	cMpvEngine *e = cMpvEngine::getInstance();
+	if (e)
+		e->setDouble("volume", volume);
 	return 0;
 }
 

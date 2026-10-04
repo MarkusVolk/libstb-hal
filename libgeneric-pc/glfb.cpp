@@ -38,6 +38,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <linux/input.h>
+#include <climits>
+#include <mpv/render_gl.h>
 #include "glfb_priv.h"
 #include "video_lib.h"
 #include "audio_lib.h"
@@ -52,6 +54,7 @@
 
 extern cVideo *videoDecoder;
 extern cAudio *audioDecoder;
+extern int sleep_us;
 
 /* the private class that does stuff only needed inside libstb-hal.
  * is used e.g. by cVideo... */
@@ -70,6 +73,7 @@ GLFramebuffer::GLFramebuffer(int x, int y)
 GLFramebuffer::~GLFramebuffer()
 {
 	glfb_priv->mShutDown = true;
+	glfb_priv->wake();
 	join();
 	delete glfb_priv;
 	glfb_priv = NULL;
@@ -101,6 +105,12 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 
 	mState.blit = true;
 	last_apts = 0;
+	mUserEvent = 0;
+	mViewX = mViewY = 0;
+	mRender = NULL;
+	mVideoFbo = mVideoTex = 0;
+	mVideoW = mVideoH = 0;
+	mVideoValid = false;
 
 	/* linux framebuffer compat mode */
 	si.bits_per_pixel = 32;
@@ -263,11 +273,14 @@ void GLFramebuffer::run()
 		hal_info("GLFB: could not set up the OpenGL ES 2.0 objects\n");
 		_exit(1);
 	}
+	glfb_priv->mUserEvent = SDL_RegisterEvents(1);
+	glfb_priv->setupRender();
 	while (!glfb_priv->mShutDown)
 	{
 		glfb_priv->pollEvents();
 		glfb_priv->render();
 	}
+	glfb_priv->teardownRender();
 	glfb_priv->releaseGLObjects();
 	SDL_GL_DestroyContext(glfb_priv->mContext);
 	SDL_DestroyWindow(glfb_priv->mWindow);
@@ -291,10 +304,12 @@ static const char *vertex_shader =
 static const char *fragment_shader =
 	"precision mediump float;\n"
 	"uniform sampler2D u_tex;\n"
+	"uniform float u_bgra;\n"
 	"varying vec2 v_tex;\n"
 	"void main()\n"
 	"{\n"
-	"	gl_FragColor = texture2D(u_tex, v_tex).bgra;\n"
+	"	vec4 c = texture2D(u_tex, v_tex);\n"
+	"	gl_FragColor = mix(c, c.bgra, u_bgra);\n"
 	"}\n";
 
 static GLuint compileShader(GLenum type, const char *source)
@@ -340,8 +355,10 @@ bool GLFbPC::setupGLObjects()
 	mState.a_tex = glGetAttribLocation(mState.program, "a_tex");
 	mState.u_scale = glGetUniformLocation(mState.program, "u_scale");
 	mState.u_xproj = glGetUniformLocation(mState.program, "u_xproj");
+	mState.u_bgra = glGetUniformLocation(mState.program, "u_bgra");
 	mState.xproj = 1.0;
 	glUseProgram(mState.program);
+	glUniform1f(mState.u_bgra, 1.0);
 	glUniform1i(glGetUniformLocation(mState.program, "u_tex"), 0);
 	glActiveTexture(GL_TEXTURE0);
 
@@ -378,7 +395,13 @@ void GLFbPC::releaseGLObjects()
 void GLFbPC::pollEvents()
 {
 	SDL_Event ev;
-	while (SDL_PollEvent(&ev))
+	/* the software live TV decoder still paces the loop, everything else just waits */
+	int timeout = 250;
+	if (!mVideoValid && videoDecoder)
+		timeout = sleep_us > 1000 ? sleep_us / 1000 : 1;
+	if (!SDL_WaitEventTimeout(&ev, timeout))
+		return;
+	do
 	{
 		switch (ev.type)
 		{
@@ -386,10 +409,15 @@ void GLFbPC::pollEvents()
 				handleKey(ev.key);
 				break;
 			case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-				if (mFullscreen)
-					mReInit = true;
-				else
-					checkReinit(ev.window.data1, ev.window.data2);
+				mReInit = true;
+				break;
+			case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+				mFullscreen = true;
+				mReInit = true;
+				break;
+			case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+				mFullscreen = false;
+				mReInit = true;
 				break;
 			case SDL_EVENT_QUIT:
 				hal_info("GLFB::%s: window closed, shutting down\n", __func__);
@@ -398,7 +426,7 @@ void GLFbPC::pollEvents()
 			default:
 				break;
 		}
-	}
+	} while (SDL_PollEvent(&ev));
 }
 
 void GLFbPC::handleKey(const SDL_KeyboardEvent &ev)
@@ -411,8 +439,8 @@ void GLFbPC::handleKey(const SDL_KeyboardEvent &ev)
 	if (key == SDLK_F)
 	{
 		hal_info("GLFB::%s: toggle fullscreen %s\n", __func__, mFullscreen ? "off" : "on");
-		mFullscreen = !mFullscreen;
-		mReInit = true;
+		/* the compositor answers with ENTER/LEAVE_FULLSCREEN and a new size */
+		SDL_SetWindowFullscreen(mWindow, !mFullscreen);
 		return;
 	}
 	std::map<SDL_Keycode, int>::const_iterator i = mKeyMap.find(key);
@@ -443,27 +471,26 @@ void GLFbPC::render()
 		mReInit = false;
 		mX = &_mX[mFullscreen];
 		mY = &_mY[mFullscreen];
-		if (mFullscreen)
+		/* the compositor decides the window size, the picture is fitted into it */
+		int x = 0, y = 0;
+		SDL_GetWindowSizeInPixels(mWindow, &x, &y);
+		if (x <= 0 || y <= 0)
 		{
-			SDL_SetWindowFullscreen(mWindow, true);
-			int x = 0, y = 0;
-			SDL_GetWindowSizeInPixels(mWindow, &x, &y);
-			*mX = x;
-			*mY = y;
-			AVRational a = { x, y };
-			if (av_cmp_q(a, mOA) < 0)
-				*mY = x * mOA.den / mOA.num;
-			else if (av_cmp_q(a, mOA) > 0)
-				*mX = y * mOA.num / mOA.den;
-			xoff = (x - *mX) / 2;
-			yoff = (y - *mY) / 2;
+			x = mState.width;
+			y = mState.height;
 		}
-		else
-		{
-			SDL_SetWindowFullscreen(mWindow, false);
-			*mX = *mY * mOA.num / mOA.den;
-		}
+		*mX = x;
+		*mY = y;
+		AVRational a = { x, y };
+		if (av_cmp_q(a, mOA) < 0)
+			*mY = x * mOA.den / mOA.num;
+		else if (av_cmp_q(a, mOA) > 0)
+			*mX = y * mOA.num / mOA.den;
+		xoff = (x - *mX) / 2;
+		yoff = (y - *mY) / 2;
 		hal_info("%s: reinit mX:%d mY:%d xoff:%d yoff:%d fs %d\n", __func__, *mX, *mY, xoff, yoff, mFullscreen);
+		mViewX = xoff;
+		mViewY = yoff;
 		glViewport(xoff, yoff, *mX, *mY);
 		float aspect = static_cast<float>(*mX) / *mY;
 		float osdaspect = static_cast<float>(mOA.den) / mOA.num;
@@ -477,15 +504,30 @@ void GLFbPC::render()
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	}
 	mReInitLock.unlock();
-	if (!mFullscreen)
-	{
-		int w = 0, h = 0;
-		SDL_GetWindowSizeInPixels(mWindow, &w, &h);
-		if (*mX != w || *mY != h)
-			SDL_SetWindowSize(mWindow, *mX, *mY);
-	}
 
-	bltDisplayBuffer(); /* decoded video stream */
+	uint64_t flags = mRender ? mpv_render_context_update(mRender) : 0;
+	restoreGLState();
+	cMpvEngine::VideoParams vp;
+	vp.valid = false;
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	if (engine)
+		vp = engine->getVideoParams();
+	if (!vp.valid)
+		mVideoValid = false;
+	if ((flags & MPV_RENDER_UPDATE_FRAME) && vp.valid)
+		renderVideo(vp);
+	if (mVideoValid)
+	{
+		AVRational a;
+		av_reduce(&a.num, &a.den, vp.w, vp.h, INT_MAX);
+		if (av_cmp_q(a, mVA))
+		{
+			mVA = a;
+			mVAchanged = true;
+		}
+	}
+	else
+		bltDisplayBuffer(); /* decoded video stream */
 	if (mState.blit)
 	{
 		/* only blit manually after fb->blit(), this helps to find missed blit() calls */
@@ -494,6 +536,8 @@ void GLFbPC::render()
 		bltOSDBuffer(); /* OSD */
 	}
 
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glViewport(mViewX, mViewY, *mX, *mY);
 	glClear(GL_COLOR_BUFFER_BIT);
 
 	if (mVAchanged)
@@ -550,42 +594,163 @@ void GLFbPC::render()
 				break;
 		}
 	}
-	glBindTexture(GL_TEXTURE_2D, mState.displaytex);
+	glUniform1f(mState.u_bgra, mVideoValid ? 0.0 : 1.0);
+	glBindTexture(GL_TEXTURE_2D, mVideoValid ? mVideoTex : mState.displaytex);
 	drawSquare(zoom, xscale);
+	glUniform1f(mState.u_bgra, 1.0);
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 	drawSquare(1.0, -100);
 
 	SDL_GL_SwapWindow(mWindow);
+	if (flags & MPV_RENDER_UPDATE_FRAME)
+		mpv_render_context_report_swap(mRender);
 
 	GLuint err = glGetError();
 	if (err != 0)
 		hal_info("GLFB::%s: GLError:%d 0x%04x\n", __func__, err, err);
-	if (sleep_us > 0)
-		usleep(sleep_us);
 }
 
-void GLFbPC::checkReinit(int x, int y)
+static void *glGetProc(void *, const char *name)
 {
-	static int last_x = 0, last_y = 0;
+	return (void *)SDL_GL_GetProcAddress(name);
+}
 
-	mReInitLock.lock();
-	if (!mFullscreen && !mReInit && (x != *mX || y != *mY))
+/* static */ void GLFbPC::renderUpdateCb(void *ctx)
+{
+	((GLFbPC *)ctx)->wake();
+}
+
+void GLFbPC::wake()
+{
+	if (!mUserEvent)
+		return;
+	SDL_Event ev;
+	SDL_zero(ev);
+	ev.type = mUserEvent;
+	SDL_PushEvent(&ev);
+}
+
+bool GLFbPC::setupRender()
+{
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	if (!engine)
+		return false;
+	mpv_opengl_init_params gl = { glGetProc, NULL };
+	int advanced = 1;
+	/* vaapi needs the native display to create its VADisplay */
+	SDL_PropertiesID props = SDL_GetWindowProperties(mWindow);
+	void *wl = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
+	void *x11 = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
+	mpv_render_param params[5];
+	int n = 0;
+	params[n].type = MPV_RENDER_PARAM_API_TYPE;
+	params[n++].data = const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL);
+	params[n].type = MPV_RENDER_PARAM_OPENGL_INIT_PARAMS;
+	params[n++].data = &gl;
+	params[n].type = MPV_RENDER_PARAM_ADVANCED_CONTROL;
+	params[n++].data = &advanced;
+	if (wl)
 	{
-		if (x != *mX && abs(x - last_x) > 2)
-		{
-			*mX = x;
-			*mY = *mX * mOA.den / mOA.num;
-		}
-		else if (y != *mY && abs(y - last_y) > 2)
-		{
-			*mY = y;
-			*mX = *mY * mOA.num / mOA.den;
-		}
-		mReInit = true;
+		params[n].type = MPV_RENDER_PARAM_WL_DISPLAY;
+		params[n++].data = wl;
 	}
-	mReInitLock.unlock();
-	last_x = x;
-	last_y = y;
+	else if (x11)
+	{
+		params[n].type = MPV_RENDER_PARAM_X11_DISPLAY;
+		params[n++].data = x11;
+	}
+	params[n].type = MPV_RENDER_PARAM_INVALID;
+	params[n].data = NULL;
+	int r = mpv_render_context_create(&mRender, engine->getHandle(), params);
+	if (r < 0)
+	{
+		hal_info("GLFB::%s: mpv_render_context_create failed: %s\n", __func__, mpv_error_string(r));
+		mRender = NULL;
+		return false;
+	}
+	mpv_render_context_set_update_callback(mRender, renderUpdateCb, this);
+	hal_info("GLFB::%s: libmpv render context ready (%s)\n", __func__, wl ? "wayland display" : x11 ? "x11 display" : "no native display");
+	return true;
+}
+
+void GLFbPC::teardownRender()
+{
+	if (mRender)
+	{
+		mpv_render_context_set_update_callback(mRender, NULL, NULL);
+		mpv_render_context_free(mRender);
+		mRender = NULL;
+	}
+	if (mVideoFbo)
+		glDeleteFramebuffers(1, &mVideoFbo);
+	if (mVideoTex)
+		glDeleteTextures(1, &mVideoTex);
+	mVideoFbo = mVideoTex = 0;
+	mVideoValid = false;
+}
+
+void GLFbPC::renderVideo(const cMpvEngine::VideoParams &vp)
+{
+	if (!mVideoFbo || vp.w != mVideoW || vp.h != mVideoH)
+	{
+		if (!mVideoFbo)
+			glGenFramebuffers(1, &mVideoFbo);
+		if (!mVideoTex)
+			glGenTextures(1, &mVideoTex);
+		glBindTexture(GL_TEXTURE_2D, mVideoTex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, vp.w, vp.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindFramebuffer(GL_FRAMEBUFFER, mVideoFbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mVideoTex, 0);
+		GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		if (status != GL_FRAMEBUFFER_COMPLETE)
+		{
+			hal_info("GLFB::%s: video FBO %dx%d incomplete: 0x%04x\n", __func__, vp.w, vp.h, status);
+			return;
+		}
+		mVideoW = vp.w;
+		mVideoH = vp.h;
+		hal_info("GLFB::%s: video FBO %dx%d\n", __func__, vp.w, vp.h);
+	}
+	mpv_opengl_fbo fbo = { (int)mVideoFbo, mVideoW, mVideoH, 0 };
+	int flip = 0;
+	mpv_render_param params[3];
+	params[0].type = MPV_RENDER_PARAM_OPENGL_FBO;
+	params[0].data = &fbo;
+	params[1].type = MPV_RENDER_PARAM_FLIP_Y;
+	params[1].data = &flip;
+	params[2].type = MPV_RENDER_PARAM_INVALID;
+	params[2].data = NULL;
+	int r = mpv_render_context_render(mRender, params);
+	if (r < 0)
+		hal_debug("GLFB::%s: mpv_render_context_render: %s\n", __func__, mpv_error_string(r));
+	else
+		mVideoValid = true;
+	restoreGLState();
+}
+
+/* mpv uses our GL context for its own objects and leaves its state behind */
+void GLFbPC::restoreGLState()
+{
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glUseProgram(mState.program);
+	glActiveTexture(GL_TEXTURE0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	glDisable(GL_SCISSOR_TEST);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_STENCIL_TEST);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glBlendEquation(GL_FUNC_ADD);
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	glClearColor(0.0, 0.0, 0.0, 1.0);
 }
 
 void GLFbPC::drawSquare(float size, float x_factor)

@@ -21,8 +21,8 @@ AM_LDFLAGS = \
 	@CLUTTER_LIBS@
 
 if USE_OPENGL
-AM_CPPFLAGS += @SDL3_CFLAGS@ @GLES2_CFLAGS@
-AM_LDFLAGS += @SDL3_LIBS@ @GLES2_LIBS@
+AM_CPPFLAGS += @SDL3_CFLAGS@ @GLES2_CFLAGS@ @MPV_CFLAGS@
+AM_LDFLAGS += @SDL3_LIBS@ @GLES2_LIBS@ @MPV_LIBS@
 endif
 
 libgeneric_la_SOURCES = \
@@ -61,5 +61,6 @@ libgeneric_la_SOURCES += \
 	playback_gst.cpp
 else
 libgeneric_la_SOURCES += \
-	playback.cpp
+	mpv_player.cpp \
+	playback_mpv.cpp
 endif
