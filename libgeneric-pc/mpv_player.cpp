@@ -366,7 +366,7 @@ void cMpvEngine::shutdown()
 cMpvEngine::cMpvEngine()
 	: mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
 	  mEof(false), mIdle(true), mLastError(0), mOwner(OWNER_NONE), mLiveSerial(0),
-	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveClockTime(0), mTimePos(0),
+	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0),
 	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0)
 {
 	mVideo.valid = false;
@@ -478,6 +478,9 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 			break;
 		case MPV_EVENT_END_FILE:
 			handleEndFile((mpv_event_end_file *)ev->data);
+			break;
+		case MPV_EVENT_PLAYBACK_RESTART:
+			liveReport();
 			break;
 		case MPV_EVENT_LOG_MESSAGE:
 			handleLog((mpv_event_log_message *)ev->data);
@@ -1101,6 +1104,7 @@ void cMpvEngine::liveStart(const LiveParams &p)
 	mOwner = OWNER_LIVE;
 	mLiveSpeed = 1.0;
 	mLiveClockTime = 0;
+	mLiveClockTicks = 0;
 	mTimePos = 0;
 	int serial = ++mLiveSerial;
 	mLiveLock.unlock();
@@ -1209,9 +1213,20 @@ void cMpvEngine::liveClock(double buffered)
 	if (live && due)
 		mLiveClockTime = now;
 	double old = mLiveSpeed;
+	int ticks = (live && due) ? ++mLiveClockTicks : 0;
 	mLiveLock.unlock();
 	if (!live || !due)
 		return;
+
+	if (ticks % 10 == 0)
+	{
+		/* for whoever watches a channel with the debug output on */
+		int64_t vo_drops = 0, dec_drops = 0;
+		getInt("frame-drop-count", vo_drops);
+		getInt("decoder-frame-drop-count", dec_drops);
+		hal_debug("live: %.2f s buffered, speed %.4f, frames dropped: %lld by the decoder, %lld at the output\n",
+			  buffered, old, (long long)dec_drops, (long long)vo_drops);
+	}
 
 	double err = buffered - target;
 	double speed = 1.0;
@@ -1231,4 +1246,34 @@ void cMpvEngine::liveClock(double buffered)
 	mLiveLock.unlock();
 	hal_debug("%s: %.2f s buffered, speed %.4f\n", __func__, buffered, speed);
 	mpv_set_property_async(mpv, 0, "speed", MPV_FORMAT_DOUBLE, &speed);
+}
+
+/* one line when a live session has its first picture or sound: what plays, and how */
+void cMpvEngine::liveReport()
+{
+	mLiveLock.lock();
+	bool live = (mOwner == OWNER_LIVE);
+	int serial = mLiveSerial;
+	mLiveLock.unlock();
+	if (!live)
+		return;
+
+	std::string vcodec = "none", acodec = "none", hwdec = "no";
+	std::vector<Track> tracks;
+	getTracks(tracks);
+	for (size_t i = 0; i < tracks.size(); i++)
+	{
+		if (!tracks[i].selected)
+			continue;
+		if (tracks[i].type == "video")
+			vcodec = tracks[i].codec;
+		else if (tracks[i].type == "audio")
+			acodec = tracks[i].codec;
+	}
+	getString("hwdec-current", hwdec);
+	int64_t w = 0, h = 0;
+	getInt("video-params/w", w);
+	getInt("video-params/h", h);
+	hal_info("live #%d: playing, video %s %dx%d hwdec %s, audio %s\n", serial,
+		 vcodec.c_str(), (int)w, (int)h, hwdec.empty() ? "no" : hwdec.c_str(), acodec.c_str());
 }
