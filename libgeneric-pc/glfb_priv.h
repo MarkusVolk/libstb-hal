@@ -26,9 +26,8 @@
 #include <vector>
 #include <map>
 #if USE_OPENGL
-#include <GL/glew.h>
-#include <GL/freeglut.h>
-#include <GL/gl.h>
+#include <SDL3/SDL.h>
+#include <GLES2/gl2.h>
 #include <linux/fb.h> /* for screeninfo etc. */
 #endif
 #if USE_CLUTTER
@@ -98,8 +97,9 @@ class GLFbPC
 		std::vector<unsigned char> *osd_buf; /* silly bounce buffer */
 
 #if USE_OPENGL
-		std::map<unsigned char, int> mKeyMap;
-		std::map<int, int> mSpecialMap;
+		std::map<SDL_Keycode, int> mKeyMap;
+		SDL_Window *mWindow;
+		SDL_GLContext mContext;
 #endif
 #if USE_CLUTTER
 		std::map<int, int> mKeyMap;
@@ -108,26 +108,21 @@ class GLFbPC
 		int64_t last_apts;
 		void run();
 
-		static void rendercb(); /* callback for GLUT */
 		void render(); /* actual render function */
 #if USE_OPENGL
-		static void keyboardcb(unsigned char key, int x, int y);
-		static void specialcb(int key, int x, int y);
-		static void resizecb(int w, int h);
+		void pollEvents(); /* SDL window and keyboard events */
+		void handleKey(const SDL_KeyboardEvent &ev);
 		void checkReinit(int w, int h); /* e.g. in case window was resized */
-		void setupGLObjects(); /* PBOs, textures and stuff */
+		bool setupGLObjects(); /* shaders, textures and stuff */
 		void releaseGLObjects();
 		void drawSquare(float size, float x_factor = 1); /* do not be square */
 #endif
 #if USE_CLUTTER
+		static void rendercb(); /* callback for clutter */
 		static bool keyboardcb(ClutterActor *actor, ClutterEvent *event, gpointer user_data);
 #endif
 
 		void initKeys(); /* setup key bindings for window */
-#if 0
-		void setupCtx(); /* create the window and make the context current */
-		void setupOSDBuffer(); /* create the OSD buffer */
-#endif
 
 		struct
 		{
@@ -136,9 +131,13 @@ class GLFbPC
 			bool blit;
 #if USE_OPENGL
 			GLuint osdtex; /* holds the OSD texture */
-			GLuint pbo; /* PBO we use for transfer to texture */
 			GLuint displaytex; /* holds the display texture */
-			GLuint displaypbo;
+			GLuint program; /* the GLES2 shader program */
+			GLint a_pos; /* vertex attribute: position */
+			GLint a_tex; /* vertex attribute: texture coordinate */
+			GLint u_scale; /* uniform: zoom / aspect scaling */
+			GLint u_xproj; /* uniform: orthographic x scaling */
+			float xproj;
 #endif
 		} mState;
 
