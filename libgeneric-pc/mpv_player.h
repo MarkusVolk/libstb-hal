@@ -105,6 +105,8 @@ class cMpvEngine : public OpenThreads::Thread
 		bool setDouble(const char *name, double v);
 		bool setString(const char *name, const std::string &v);
 		bool getFlag(const char *name, bool &v);
+		void playStats();
+		int64_t mStatsTime;
 		bool getInt(const char *name, int64_t &v);
 		bool getDouble(const char *name, double &v);
 		bool getString(const char *name, std::string &v);
