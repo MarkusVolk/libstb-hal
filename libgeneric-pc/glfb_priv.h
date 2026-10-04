@@ -113,7 +113,8 @@ class GLFbPC
 
 		void render(); /* actual render function */
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
-		void handleKey(const SDL_KeyboardEvent &ev);
+		void handleKey(SDL_Keycode key);
+		static bool producesText(SDL_Keycode key);
 		void wake();
 		bool setupRender(); /* the libmpv render context, needs the GL context */
 		void teardownRender();

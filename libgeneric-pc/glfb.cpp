@@ -218,7 +218,7 @@ void GLFbPC::initKeys()
 	mKeyMap[SDLK_BACKSPACE] = KEY_BACKSPACE;
 	mKeyMap[SDLK_SPACE]     = KEY_SPACE;
 
-	/* shift keys, see handleKey() */
+	/* shift keys, they arrive as upper case text */
 	mKeyMap['F'] = KEY_FAVORITES;
 	mKeyMap['M'] = KEY_MODE;
 	mKeyMap['S'] = KEY_SAT;
@@ -261,6 +261,9 @@ void GLFramebuffer::run()
 	if (!SDL_GL_SetSwapInterval(1))
 		hal_info("GLFB: SDL_GL_SetSwapInterval: %s\n", SDL_GetError());
 	SDL_HideCursor();
+	/* printable keys come in as text, translated with the keyboard layout of
+	 * the compositor or, on KMS, of the console */
+	SDL_StartTextInput(glfb_priv->mWindow);
 	/* 32bit FB depth, *2 because tuxtxt uses a shadow buffer */
 	int fbmem = x * y * 4 * 2;
 	osd_buf.resize(fbmem);
@@ -405,7 +408,15 @@ void GLFbPC::pollEvents()
 		switch (ev.type)
 		{
 			case SDL_EVENT_KEY_DOWN:
-				handleKey(ev.key);
+				if (!producesText(ev.key.key))
+					handleKey(ev.key.key);
+				break;
+			case SDL_EVENT_TEXT_INPUT:
+				for (const char *c = ev.text.text; c && *c; c++)
+					if (*c > 0x20 && *c < 0x7f)
+						handleKey((SDL_Keycode)*c);
+					else if (*c == ' ')
+						handleKey(SDLK_SPACE);
 				break;
 			case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 				mReInit = true;
@@ -428,12 +439,23 @@ void GLFbPC::pollEvents()
 	} while (SDL_PollEvent(&ev));
 }
 
-void GLFbPC::handleKey(const SDL_KeyboardEvent &ev)
+bool GLFbPC::producesText(SDL_Keycode key)
 {
-	SDL_Keycode key = ev.key;
-	/* the shift variants of the letter keys have their own meaning */
-	if (key >= SDLK_A && key <= SDLK_Z && (ev.mod & SDL_KMOD_SHIFT))
-		key = key - SDLK_A + 'A';
+	if (key >= 0x20 && key < 0x7f)
+		return true;
+	switch (key)
+	{
+		case SDLK_KP_0: case SDLK_KP_1: case SDLK_KP_2: case SDLK_KP_3: case SDLK_KP_4:
+		case SDLK_KP_5: case SDLK_KP_6: case SDLK_KP_7: case SDLK_KP_8: case SDLK_KP_9:
+		case SDLK_KP_PLUS: case SDLK_KP_MINUS: case SDLK_KP_PERIOD:
+			return true;
+		default:
+			return false;
+	}
+}
+
+void GLFbPC::handleKey(SDL_Keycode key)
+{
 	hal_debug("GLFB::%s: 0x%x\n", __func__, (unsigned int)key);
 	if (key == SDLK_F)
 	{
