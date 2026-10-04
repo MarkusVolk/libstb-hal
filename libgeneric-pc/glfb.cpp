@@ -115,6 +115,12 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mFramePending = false;
 	mPadKey = 0;
 	mPadNext = 0;
+	memset(mOsdBox, 0, sizeof(mOsdBox));
+	mTexStale = false;
+	mDirect = false;
+	mWinW = mWinH = 0;
+	memset(mLastPig, 0, sizeof(mLastPig));
+	mLastDirect = false;
 	memset(mPadAxis, 0, sizeof(mPadAxis));
 
 	/* linux framebuffer compat mode */
@@ -685,6 +691,7 @@ void GLFbPC::render()
 	uint64_t t_start = SDL_GetTicksNS();
 
 	mReInitLock.lock();
+	const bool reinit = mReInit;
 	if (mReInit)
 	{
 		int xoff = 0;
@@ -703,6 +710,8 @@ void GLFbPC::render()
 		}
 		*mX = x;
 		*mY = y;
+		mWinW = x;
+		mWinH = y;
 		AVRational a = { x, y };
 		if (av_cmp_q(a, mOA) < 0)
 			*mY = x * mOA.den / mOA.num;
@@ -739,12 +748,42 @@ void GLFbPC::render()
 		vp = engine->getVideoParams();
 	if (!vp.valid)
 		mVideoValid = false;
+	/* Drawing the video into a texture first and that onto the window costs
+	 * a pass over every pixel that small GPUs do not have to spare at 50
+	 * frames per second. Where the picture fills the window anyway, mpv
+	 * draws straight into it, further down. */
+	const bool direct = vp.valid && directVideo(vp.w, vp.h);
+	bool direct_held = false;
+	bool mpv_drew = false;
+
+	/* Nothing has changed since the last swap: leave what is on the screen
+	 * alone. A swap waits for the display, and the next video frame would
+	 * be late by the time it returns. */
+	int pig[4] = { 0, 0, 0, 0 };
+	if (videoDecoder)
+	{
+		pig[0] = videoDecoder->pig_x;
+		pig[1] = videoDecoder->pig_y;
+		pig[2] = videoDecoder->pig_w;
+		pig[3] = videoDecoder->pig_h;
+	}
+	const bool same = !memcmp(pig, mLastPig, sizeof(pig)) && direct == mLastDirect;
+	memcpy(mLastPig, pig, sizeof(pig));
+	mLastDirect = direct;
+	if (mVideoValid && same && !(flags & MPV_RENDER_UPDATE_FRAME) && !mState.blit && !reinit &&
+	    !mVAchanged && !mFramePending)
+		return;
 	if (flags & MPV_RENDER_UPDATE_FRAME)
 	{
 		bool draw = engine && engine->renderBegin();
 		mFramePending = false;
-		if (draw && vp.valid)
+		if (draw && vp.valid && direct)
+			direct_held = true;
+		else if (draw && vp.valid)
+		{
 			renderVideo(vp);
+			mpv_drew = true;
+		}
 		else if (draw)
 		{
 			/* the frame is here before its size is: leave it where it is
@@ -763,6 +802,18 @@ void GLFbPC::render()
 			params[1].type = MPV_RENDER_PARAM_INVALID;
 			params[1].data = NULL;
 			mpv_render_context_render(mRender, params);
+		}
+		if (engine && !direct_held)
+			engine->renderEnd();
+	}
+	else if (mVideoValid && !direct && mTexStale && vp.valid)
+	{
+		/* back from drawing directly, without a new frame: the texture
+		 * still has an old one */
+		if (engine && engine->renderBegin())
+		{
+			renderVideo(vp);
+			mpv_drew = true;
 		}
 		if (engine)
 			engine->renderEnd();
@@ -846,19 +897,45 @@ void GLFbPC::render()
 				break;
 		}
 	}
-	glUniform1f(mState.u_bgra, mVideoValid ? 0.0 : 1.0);
-	glBindTexture(GL_TEXTURE_2D, mVideoValid ? mVideoTex : mState.displaytex);
-	drawSquare(zoom, xscale);
-	glUniform1f(mState.u_bgra, 1.0);
-	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
-	drawSquare(1.0, -100);
+	bool drawn = false;
+	if (direct && (direct_held || mVideoValid) && vp.valid)
+	{
+		/* without a new frame mpv draws the one it has again */
+		if (!direct_held && engine)
+			direct_held = engine->renderBegin() ? true : (engine->renderEnd(), false);
+		if (direct_held)
+		{
+			drawn = renderDirect();
+			mpv_drew = true;
+		}
+	}
+	if (direct_held && engine)
+		engine->renderEnd();
+	if (mVideoValid && drawn != mDirect)
+	{
+		mDirect = drawn;
+		hal_info("GLFB::%s: the video is drawn %s\n", __func__, drawn ? "straight into the window" : "through a texture");
+	}
+	if (!drawn)
+	{
+		const bool video = mVideoValid && !mTexStale;
+		glDisable(GL_BLEND);
+		glUniform1f(mState.u_bgra, video ? 0.0 : 1.0);
+		glBindTexture(GL_TEXTURE_2D, video ? mVideoTex : mState.displaytex);
+		drawSquare(zoom, xscale);
+		glEnable(GL_BLEND);
+	}
+	drawOSD();
 
 	uint64_t t_draw = SDL_GetTicksNS();
 	SDL_GL_SwapWindow(mWindow);
 	uint64_t t_swap = SDL_GetTicksNS();
+	/* a redraw takes a frame along that arrived in the meantime, so mpv is
+	 * told about every swap of something it drew, or it would wait for one */
+	if (mpv_drew && mRender)
+		mpv_render_context_report_swap(mRender);
 	if (flags & MPV_RENDER_UPDATE_FRAME)
 	{
-		mpv_render_context_report_swap(mRender);
 		stat_frames++;
 		stat_video += t_video - t_start;
 		stat_draw += t_draw - t_video;
@@ -1009,11 +1086,17 @@ void GLFbPC::renderVideo(const cMpvEngine::VideoParams &vp)
 	params[1].data = &flip;
 	params[2].type = MPV_RENDER_PARAM_INVALID;
 	params[2].data = NULL;
+	/* mpv expects the state a fresh context has, and would blend its
+	 * picture with what is there already */
+	glDisable(GL_BLEND);
 	int r = mpv_render_context_render(mRender, params);
 	if (r < 0)
 		hal_debug("GLFB::%s: mpv_render_context_render: %s\n", __func__, mpv_error_string(r));
 	else
+	{
 		mVideoValid = true;
+		mTexStale = false;
+	}
 	restoreGLState();
 }
 
@@ -1100,6 +1183,108 @@ void GLFbPC::bltOSDBuffer()
 	/* FIXME: copy each time */
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mState.width, mState.height, GL_RGBA, GL_UNSIGNED_BYTE, osd_buf->data());
+
+	/* where the OSD shows anything at all: nothing else of it has to be
+	 * drawn, and while a programme is watched that is mostly nothing */
+	const uint32_t *p = (const uint32_t *)osd_buf->data();
+	const int w = mState.width, h = mState.height;
+	int x0 = w, x1 = -1, y0 = h, y1 = -1;
+	for (int y = 0; y < h; y++, p += w)
+	{
+		int l = 0;
+		while (l < w && !(p[l] & 0xff000000))
+			l++;
+		if (l == w)
+			continue;
+		int r = w - 1;
+		while (!(p[r] & 0xff000000))
+			r--;
+		if (l < x0)
+			x0 = l;
+		if (r > x1)
+			x1 = r;
+		if (y < y0)
+			y0 = y;
+		y1 = y;
+	}
+	mOsdBox[0] = x0;
+	mOsdBox[1] = y0;
+	mOsdBox[2] = x1 + 1;
+	mOsdBox[3] = y1 + 1;
+}
+
+void GLFbPC::drawOSD()
+{
+	if (mOsdBox[2] <= mOsdBox[0] || mOsdBox[3] <= mOsdBox[1])
+		return;
+
+	/* the quad covers the viewport, the scissor keeps the work to the part
+	 * of it that shows something */
+	const float half = *mX / 2.0f;
+	const float u0 = (float)mOsdBox[0] / mState.width, u1 = (float)mOsdBox[2] / mState.width;
+	const float v0 = (float)mOsdBox[1] / mState.height, v1 = (float)mOsdBox[3] / mState.height;
+	int sx0 = mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u0 - 1.0f))) - 2;
+	int sx1 = mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u1 - 1.0f))) + 3;
+	int sy0 = mViewY + (int)(*mY * (1.0f - v1)) - 2;
+	int sy1 = mViewY + (int)(*mY * (1.0f - v0)) + 3;
+	if (sx0 < 0)
+		sx0 = 0;
+	if (sy0 < 0)
+		sy0 = 0;
+	glEnable(GL_SCISSOR_TEST);
+	glScissor(sx0, sy0, sx1 - sx0, sy1 - sy0);
+	glUniform1f(mState.u_bgra, 1.0);
+	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
+	drawSquare(1.0, -100);
+	glDisable(GL_SCISSOR_TEST);
+}
+
+/* the video fills the viewport as it is: mpv can draw it there itself. It
+ * is given the whole window and centres the picture like the viewport is. */
+bool GLFbPC::directVideo(int w, int h)
+{
+	/* a picture smaller than the window is cheaper the other way round:
+	 * mpv's conversion costs per pixel it writes, a plain copy of its
+	 * result to the window much less */
+	if ((int64_t)w * h < (int64_t)mWinW * mWinH)
+		return false;
+	if (!mRender || mVAchanged || zoom != 1.0 || xscale != 1.0 || mWinW <= 0 || mWinH <= 0)
+		return false;
+	if (mState.xproj < 0.999 || mState.xproj > 1.001)
+		return false;
+	if (av_cmp_q(mVA, mOA))
+		return false;
+	if (videoDecoder && videoDecoder->pig_x > 0 && videoDecoder->pig_y > 0 &&
+	    videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0)
+		return false;
+	return true;
+}
+
+bool GLFbPC::renderDirect()
+{
+	mpv_opengl_fbo fbo = { 0, mWinW, mWinH, 0 };
+	int flip = 1;
+	mpv_render_param params[3];
+	params[0].type = MPV_RENDER_PARAM_OPENGL_FBO;
+	params[0].data = &fbo;
+	params[1].type = MPV_RENDER_PARAM_FLIP_Y;
+	params[1].data = &flip;
+	params[2].type = MPV_RENDER_PARAM_INVALID;
+	params[2].data = NULL;
+	/* mpv expects the state a fresh context has, and would blend its
+	 * picture with what is there already */
+	glDisable(GL_BLEND);
+	int r = mpv_render_context_render(mRender, params);
+	restoreGLState();
+	glViewport(mViewX, mViewY, *mX, *mY);
+	if (r < 0)
+	{
+		hal_debug("GLFB::%s: mpv_render_context_render: %s\n", __func__, mpv_error_string(r));
+		return false;
+	}
+	mVideoValid = true;
+	mTexStale = true;
+	return true;
 }
 
 void GLFbPC::bltDisplayBuffer()

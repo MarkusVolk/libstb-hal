@@ -116,6 +116,16 @@ class GLFbPC
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
 		void handleKey(SDL_Keycode key);
 		void pushKey(int code);
+		int mOsdBox[4]; /* x0, y0, x1, y1 of what the OSD shows; empty when x1 <= x0 */
+		bool mDirect; /* what the log said last about how the video is drawn */
+		int mLastPig[4]; /* what the last picture on the screen was drawn with */
+		bool mLastDirect;
+		int mWinW; /* the window in pixels, the viewport may be smaller */
+		int mWinH;
+		bool mTexStale; /* the video was drawn directly, mVideoTex has an old frame */
+		void drawOSD();
+		bool directVideo(int w, int h);
+		bool renderDirect();
 		/* a gamepad as remote control: what is held down repeats */
 		int mPadKey; /* the key that repeats, 0 for none */
 		uint64_t mPadNext; /* SDL ticks of its next repeat */
