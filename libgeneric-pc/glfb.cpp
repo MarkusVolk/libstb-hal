@@ -637,6 +637,7 @@ bool GLFbPC::setupRender()
 	SDL_PropertiesID props = SDL_GetWindowProperties(mWindow);
 	void *wl = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, NULL);
 	void *x11 = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL);
+	mpv_opengl_drm_params_v2 drm = { -1, -1, -1, NULL, -1 };
 	mpv_render_param params[5];
 	int n = 0;
 	params[n].type = MPV_RENDER_PARAM_API_TYPE;
@@ -655,6 +656,16 @@ bool GLFbPC::setupRender()
 		params[n].type = MPV_RENDER_PARAM_X11_DISPLAY;
 		params[n++].data = x11;
 	}
+	else
+	{
+		/* KMS without a display server: vaapi opens the render node itself */
+		drm.render_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+		if (drm.render_fd >= 0)
+		{
+			params[n].type = MPV_RENDER_PARAM_DRM_DISPLAY_V2;
+			params[n++].data = &drm;
+		}
+	}
 	params[n].type = MPV_RENDER_PARAM_INVALID;
 	params[n].data = NULL;
 	int r = mpv_render_context_create(&mRender, engine->getHandle(), params);
@@ -665,7 +676,7 @@ bool GLFbPC::setupRender()
 		return false;
 	}
 	mpv_render_context_set_update_callback(mRender, renderUpdateCb, this);
-	hal_info("GLFB::%s: libmpv render context ready (%s)\n", __func__, wl ? "wayland display" : x11 ? "x11 display" : "no native display");
+	hal_info("GLFB::%s: libmpv render context ready (%s)\n", __func__, wl ? "wayland display" : x11 ? "x11 display" : drm.render_fd >= 0 ? "drm render node" : "no native display");
 	return true;
 }
 
