@@ -258,6 +258,26 @@ void GLFramebuffer::run()
 		hal_info("GLFB: SDL_CreateWindow failed: %s\n", SDL_GetError());
 		_exit(1);
 	}
+	/* GLFB_MODE=<width>x<height>[@<rate>] picks the mode of the display for
+	 * the fullscreen window; without it the display stays as it is. On KMS
+	 * that is what the television prefers, 4K at whatever rate the board can
+	 * drive, while broadcasts want 50 Hz far more than they want pixels. */
+	const char *want = getenv("GLFB_MODE");
+	if (want && glfb_priv->mFullscreen)
+	{
+		int w = 0, h = 0;
+		float rate = 0;
+		SDL_DisplayMode mode;
+		if (sscanf(want, "%dx%d@%f", &w, &h, &rate) >= 2 &&
+		    SDL_GetClosestFullscreenDisplayMode(SDL_GetDisplayForWindow(glfb_priv->mWindow), w, h, rate, false, &mode) &&
+		    SDL_SetWindowFullscreenMode(glfb_priv->mWindow, &mode))
+		{
+			SDL_SyncWindow(glfb_priv->mWindow);
+			hal_info("GLFB: asked for %s, using %dx%d at %.2f Hz\n", want, mode.w, mode.h, mode.refresh_rate);
+		}
+		else
+			hal_info("GLFB: no display mode for GLFB_MODE=%s: %s\n", want, SDL_GetError());
+	}
 	glfb_priv->mContext = SDL_GL_CreateContext(glfb_priv->mWindow);
 	if (!glfb_priv->mContext)
 	{
