@@ -68,6 +68,7 @@ class cMpvEngine : public OpenThreads::Thread
 			int sh;
 			double aspect;
 			double fps;
+			bool drmprime; /* the frames stay in the decoder's memory */
 		};
 		struct AudioParams
 		{
@@ -106,6 +107,12 @@ class cMpvEngine : public OpenThreads::Thread
 		/* the refresh rate of the display, which mpv cannot see through the
 		 * render API; asynchronous, so the GL thread may call it */
 		void setDisplayFps(double fps);
+		/* the share of the window left free around the video, 0 for none */
+		void setVideoMargins(double left, double top, double right, double bottom);
+		/* how a picture of another aspect ratio fills the window: panscan
+		 * from 0 (all of it) to 1 (all of the window), aspect > 0 stretches
+		 * it to that ratio */
+		void setVideoFit(double panscan, double aspect);
 		bool setString(const char *name, const std::string &v);
 		bool getFlag(const char *name, bool &v);
 		void playStats();

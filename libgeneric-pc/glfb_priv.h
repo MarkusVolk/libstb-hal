@@ -131,10 +131,29 @@ class GLFbPC
 		float mWantRate;
 		bool mModeChange;
 		void applyDisplayMode(int w, int h, float rate, const char *who);
+		/* the video on a plane of the display controller, below the window
+		 * that then only carries the OSD (Raspberry Pi and other KMS
+		 * hardware that scans DRM PRIME frames itself) */
+		bool mPlaneOK; /* set up: mpv hands its frames to the primary plane */
+		bool mOnPlane; /* the video that is playing is on the plane */
+		int mDrmFd;
+		struct _drmModeAtomicReq *mPlaneReq; /* mpv adds the plane's properties here */
+		GLuint mPlaneFbo; /* mpv wants a target, only its size matters */
+		GLuint mPlaneTex;
+		int mPlaneFboW;
+		int mPlaneFboH;
+		double mMargins[4];
+		double mFit[2]; /* panscan and stretched aspect sent to mpv */
+		bool setupPlane(void *drm_params);
+		bool renderPlane();
+		void planeMargins();
 		int mWinW; /* the window in pixels, the viewport may be smaller */
 		int mWinH;
 		bool mTexStale; /* the video was drawn directly, mVideoTex has an old frame */
 		void drawOSD();
+		uint64_t osdChecksum();
+		uint64_t mOsdSum; /* of the OSD that is on the window's plane */
+		bool mPlaneRedraw;
 		bool directVideo(int w, int h);
 		bool renderDirect();
 		/* a gamepad as remote control: what is held down repeats */
