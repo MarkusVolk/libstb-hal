@@ -140,6 +140,7 @@ cVideo::cVideo(int, void *, void *, unsigned int)
 	display_crop = DISPLAY_AR_MODE_LETTERBOX;
 	v_format = VIDEO_FORMAT_MPEG2;
 	output_h = 0;
+	v_std_set = false;
 	stillpicture = false;
 }
 
@@ -276,6 +277,11 @@ int cVideo::setBlank(int)
 
 int cVideo::GetVideoSystem()
 {
+	/* the system the output was set to, as the boxes with a real video
+	 * output report it; what is decoded says nothing about the display */
+	if (v_std_set)
+		return v_std;
+
 	int current_video_system = VIDEO_STD_1080I50;
 
 	liveInfo();
@@ -290,39 +296,74 @@ int cVideo::GetVideoSystem()
 
 int cVideo::SetVideoSystem(int system, bool)
 {
-	int h;
+	int w, h;
+	float rate;
 	switch (system)
 	{
 		case VIDEO_STD_NTSC:
 		case VIDEO_STD_480P:
-			h = 480;
+			w = 720; h = 480; rate = 60;
 			break;
-		case VIDEO_STD_1080I60:
-		case VIDEO_STD_1080I50:
-		case VIDEO_STD_1080P30:
-		case VIDEO_STD_1080P24:
-		case VIDEO_STD_1080P25:
-		case VIDEO_STD_1080P50:
-			h = 1080;
-			break;
-		case VIDEO_STD_720P50:
-		case VIDEO_STD_720P60:
-			h = 720;
-			break;
-		case VIDEO_STD_AUTO:
-			hal_info("%s: VIDEO_STD_AUTO not implemented\n", __func__);
-		// fallthrough
 		case VIDEO_STD_SECAM:
 		case VIDEO_STD_PAL:
 		case VIDEO_STD_576P:
-			h = 576;
+			w = 720; h = 576; rate = 50;
 			break;
+		case VIDEO_STD_720P50:
+			w = 1280; h = 720; rate = 50;
+			break;
+		case VIDEO_STD_720P60:
+			w = 1280; h = 720; rate = 60;
+			break;
+		/* there is no interlaced output here, 1080i is 1080p at the same rate */
+		case VIDEO_STD_1080I50:
+		case VIDEO_STD_1080P50:
+			w = 1920; h = 1080; rate = 50;
+			break;
+		case VIDEO_STD_1080I60:
+		case VIDEO_STD_1080P60:
+			w = 1920; h = 1080; rate = 60;
+			break;
+		case VIDEO_STD_1080P24:
+			w = 1920; h = 1080; rate = 24;
+			break;
+		case VIDEO_STD_1080P2397:
+			w = 1920; h = 1080; rate = 23.976;
+			break;
+		case VIDEO_STD_1080P25:
+			w = 1920; h = 1080; rate = 25;
+			break;
+		case VIDEO_STD_1080P30:
+			w = 1920; h = 1080; rate = 30;
+			break;
+		case VIDEO_STD_1080P2997:
+			w = 1920; h = 1080; rate = 29.97;
+			break;
+		case VIDEO_STD_2160P24:
+			w = 3840; h = 2160; rate = 24;
+			break;
+		case VIDEO_STD_2160P25:
+			w = 3840; h = 2160; rate = 25;
+			break;
+		case VIDEO_STD_2160P30:
+			w = 3840; h = 2160; rate = 30;
+			break;
+		case VIDEO_STD_2160P50:
+			w = 3840; h = 2160; rate = 50;
+			break;
+		case VIDEO_STD_AUTO:
+			hal_info("%s: VIDEO_STD_AUTO not implemented\n", __func__);
+			return 0;
 		default:
 			hal_info("%s: unhandled value %d\n", __func__, system);
 			return 0;
 	}
-//	v_std = (VIDEO_STD) system;
+	hal_info("%s: %d -> %dx%d at %.2f Hz\n", __func__, system, w, h, rate);
+	v_std = (VIDEO_STD) system;
+	v_std_set = true;
 	output_h = h;
+	/* where the window owns the display, this is its mode from now on */
+	glfb_priv->setDisplayMode(w, h, rate);
 	if (display_aspect < DISPLAY_AR_RAW && output_h > 0) /* don't know what to do with this */
 		glfb_priv->setOutputFormat(aspect_ratios[display_aspect], output_h, display_crop);
 	return 0;

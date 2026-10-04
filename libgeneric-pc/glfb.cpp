@@ -85,6 +85,60 @@ void GLFramebuffer::blit()
 	glfb_priv->blit();
 }
 
+bool GLFramebuffer::setOSDResolution(int x, int y)
+{
+	if (!glfb_priv->setOSDResolution(x, y))
+		return false;
+	si = glfb_priv->getScreenInfo();
+	return true;
+}
+
+/* the OSD buffer was made for the largest size, so it stays where it is and
+ * whoever draws into it keeps its pointer */
+bool GLFbPC::setOSDResolution(int x, int y)
+{
+	if (x <= 0 || y <= 0 || (size_t)x * y * 4 * 2 > osd_buf->size())
+		return false;
+
+	mReInitLock.lock();
+	mState.width = x;
+	mState.height = y;
+	si.xres = si.xres_virtual = x;
+	si.yres = si.yres_virtual = y;
+	mOsdResize = true;
+	mReInit = true;
+	mReInitLock.unlock();
+	hal_info("GLFB::%s: %dx%d\n", __func__, x, y);
+	wake();
+	return true;
+}
+
+void GLFbPC::setDisplayMode(int w, int h, float rate)
+{
+	mReInitLock.lock();
+	mWantW = w;
+	mWantH = h;
+	mWantRate = rate;
+	mModeChange = true;
+	mReInitLock.unlock();
+	wake();
+}
+
+/* only on the GL thread */
+void GLFbPC::applyDisplayMode(int w, int h, float rate, const char *who)
+{
+	SDL_DisplayMode mode;
+	if (SDL_GetClosestFullscreenDisplayMode(SDL_GetDisplayForWindow(mWindow), w, h, rate, false, &mode) &&
+	    SDL_SetWindowFullscreenMode(mWindow, &mode))
+	{
+		SDL_SyncWindow(mWindow);
+		hal_info("GLFB: %s asked for %dx%d at %.2f Hz, using %dx%d at %.2f Hz\n", who, w, h, rate,
+			 mode.w, mode.h, mode.refresh_rate);
+	}
+	else
+		hal_info("GLFB: no display mode for %dx%d at %.2f Hz (%s): %s\n", w, h, rate, who, SDL_GetError());
+}
+
 GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mShutDown(false), mInitDone(false)
 {
 	osd_buf = &buf;
@@ -119,6 +173,12 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mTexStale = false;
 	mDirect = false;
 	mWinW = mWinH = 0;
+	mOsdW = x;
+	mOsdH = y;
+	mOsdResize = false;
+	mWantW = mWantH = 0;
+	mWantRate = 0;
+	mModeChange = false;
 	memset(mLastPig, 0, sizeof(mLastPig));
 	mLastDirect = false;
 	memset(mPadAxis, 0, sizeof(mPadAxis));
@@ -273,16 +333,10 @@ void GLFramebuffer::run()
 	{
 		int w = 0, h = 0;
 		float rate = 0;
-		SDL_DisplayMode mode;
-		if (sscanf(want, "%dx%d@%f", &w, &h, &rate) >= 2 &&
-		    SDL_GetClosestFullscreenDisplayMode(SDL_GetDisplayForWindow(glfb_priv->mWindow), w, h, rate, false, &mode) &&
-		    SDL_SetWindowFullscreenMode(glfb_priv->mWindow, &mode))
-		{
-			SDL_SyncWindow(glfb_priv->mWindow);
-			hal_info("GLFB: asked for %s, using %dx%d at %.2f Hz\n", want, mode.w, mode.h, mode.refresh_rate);
-		}
+		if (sscanf(want, "%dx%d@%f", &w, &h, &rate) >= 2)
+			glfb_priv->applyDisplayMode(w, h, rate, "GLFB_MODE");
 		else
-			hal_info("GLFB: no display mode for GLFB_MODE=%s: %s\n", want, SDL_GetError());
+			hal_info("GLFB: GLFB_MODE=%s is not <width>x<height>[@<rate>]\n", want);
 	}
 	glfb_priv->mContext = SDL_GL_CreateContext(glfb_priv->mWindow);
 	if (!glfb_priv->mContext)
@@ -299,7 +353,8 @@ void GLFramebuffer::run()
 	 * the compositor or, on KMS, of the console */
 	SDL_StartTextInput(glfb_priv->mWindow);
 	/* 32bit FB depth, *2 because tuxtxt uses a shadow buffer */
-	int fbmem = x * y * 4 * 2;
+	/* room for the largest OSD, see setOSDResolution() */
+	int fbmem = (x > 1920 ? x : 1920) * (y > 1080 ? y : 1080) * 4 * 2;
 	osd_buf.resize(fbmem);
 	hal_info("GLFB: OSD buffer set to %d bytes at 0x%p\n", fbmem, osd_buf.data());
 	glfb_priv->mInitDone = true; /* signal that setup is finished */
@@ -527,7 +582,9 @@ bool GLFbPC::producesText(SDL_Keycode key)
 void GLFbPC::handleKey(SDL_Keycode key)
 {
 	hal_debug("GLFB::%s: 0x%x\n", __func__, (unsigned int)key);
-	if (key == SDLK_F)
+	/* on KMS there is no desktop to leave the fullscreen window for */
+	const char *driver = SDL_GetCurrentVideoDriver();
+	if (key == SDLK_F && !(driver && !strcmp(driver, "kmsdrm")))
 	{
 		hal_info("GLFB::%s: toggle fullscreen %s\n", __func__, mFullscreen ? "off" : "on");
 		/* the compositor answers with ENTER/LEAVE_FULLSCREEN and a new size */
@@ -691,6 +748,24 @@ void GLFbPC::render()
 	uint64_t t_start = SDL_GetTicksNS();
 
 	mReInitLock.lock();
+	if (mModeChange)
+	{
+		mModeChange = false;
+		/* a desktop keeps its mode, the window is scaled there */
+		const char *driver = SDL_GetCurrentVideoDriver();
+		if (mFullscreen && driver && !strcmp(driver, "kmsdrm"))
+			applyDisplayMode(mWantW, mWantH, mWantRate, "the video system");
+	}
+	if (mOsdResize)
+	{
+		mOsdResize = false;
+		mOsdW = mState.width;
+		mOsdH = mState.height;
+		glBindTexture(GL_TEXTURE_2D, mState.osdtex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mOsdW, mOsdH, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+		memset(mOsdBox, 0, sizeof(mOsdBox));
+		mState.blit = true;
+	}
 	const bool reinit = mReInit;
 	if (mReInit)
 	{
@@ -1189,12 +1264,12 @@ void GLFbPC::bltOSDBuffer()
 {
 	/* FIXME: copy each time */
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
-	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mState.width, mState.height, GL_RGBA, GL_UNSIGNED_BYTE, osd_buf->data());
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mOsdW, mOsdH, GL_RGBA, GL_UNSIGNED_BYTE, osd_buf->data());
 
 	/* where the OSD shows anything at all: nothing else of it has to be
 	 * drawn, and while a programme is watched that is mostly nothing */
 	const uint32_t *p = (const uint32_t *)osd_buf->data();
-	const int w = mState.width, h = mState.height;
+	const int w = mOsdW, h = mOsdH;
 	int x0 = w, x1 = -1, y0 = h, y1 = -1;
 	for (int y = 0; y < h; y++, p += w)
 	{
@@ -1228,8 +1303,8 @@ void GLFbPC::drawOSD()
 	/* the quad covers the viewport, the scissor keeps the work to the part
 	 * of it that shows something */
 	const float half = *mX / 2.0f;
-	const float u0 = (float)mOsdBox[0] / mState.width, u1 = (float)mOsdBox[2] / mState.width;
-	const float v0 = (float)mOsdBox[1] / mState.height, v1 = (float)mOsdBox[3] / mState.height;
+	const float u0 = (float)mOsdBox[0] / mOsdW, u1 = (float)mOsdBox[2] / mOsdW;
+	const float v0 = (float)mOsdBox[1] / mOsdH, v1 = (float)mOsdBox[3] / mOsdH;
 	int sx0 = mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u0 - 1.0f))) - 2;
 	int sx1 = mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u1 - 1.0f))) + 3;
 	int sy0 = mViewY + (int)(*mY * (1.0f - v1)) - 2;
