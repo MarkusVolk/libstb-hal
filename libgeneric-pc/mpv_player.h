@@ -103,6 +103,9 @@ class cMpvEngine : public OpenThreads::Thread
 		bool setFlag(const char *name, bool v);
 		bool setInt(const char *name, int64_t v);
 		bool setDouble(const char *name, double v);
+		/* the refresh rate of the display, which mpv cannot see through the
+		 * render API; asynchronous, so the GL thread may call it */
+		void setDisplayFps(double fps);
 		bool setString(const char *name, const std::string &v);
 		bool getFlag(const char *name, bool &v);
 		void playStats();
