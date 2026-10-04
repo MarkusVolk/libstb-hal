@@ -168,6 +168,7 @@ class cMpvEngine : public OpenThreads::Thread
 		int64_t mLiveClockTime;
 		int mLiveClockTicks;
 		double mTimePos;
+		bool mNoDeinterlace;
 
 		static cMpvEngine *instance;
 		mpv_handle *mpv;
