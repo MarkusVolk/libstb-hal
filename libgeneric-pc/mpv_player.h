@@ -155,6 +155,7 @@ class cMpvEngine : public OpenThreads::Thread
 		int64_t mStartedEntry;
 		int64_t mLoadedEntry;
 		void liveClock(double buffered);
+		void liveReport();
 
 		enum Owner { OWNER_NONE, OWNER_PLAYBACK, OWNER_LIVE };
 		OpenThreads::Mutex mLiveLock;
@@ -165,6 +166,7 @@ class cMpvEngine : public OpenThreads::Thread
 		bool mLiveAudioOn;
 		double mLiveSpeed;
 		int64_t mLiveClockTime;
+		int mLiveClockTicks;
 		double mTimePos;
 
 		static cMpvEngine *instance;
