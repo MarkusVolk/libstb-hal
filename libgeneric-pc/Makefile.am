@@ -8,7 +8,8 @@ AM_CPPFLAGS += \
 	@AVUTIL_CFLAGS@ \
 	@SDL3_CFLAGS@ \
 	@GLES2_CFLAGS@ \
-	@MPV_CFLAGS@
+	@MPV_CFLAGS@ \
+	@DRM_CFLAGS@
 
 AM_CXXFLAGS = -fno-rtti -fno-exceptions -fno-strict-aliasing
 
@@ -22,7 +23,8 @@ AM_LDFLAGS = \
 	@SWSCALE_LIBS@ \
 	@SDL3_LIBS@ \
 	@GLES2_LIBS@ \
-	@MPV_LIBS@
+	@MPV_LIBS@ \
+	@DRM_LIBS@
 
 libgeneric_la_SOURCES = \
 	hardware_caps.c \
