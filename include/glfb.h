@@ -49,6 +49,10 @@ class GLFramebuffer : public OpenThreads::Thread
 		/* while fd is not -1, the keyboard writes glfb_term_key to it
 		 * instead of sending remote control keys */
 		void setTerminalFd(int fd);
+		/* gives the display and the input devices away to another program
+		 * and takes them back; the OSD buffer stays */
+		void suspend();
+		void resume();
 
 	private:
 		fb_var_screeninfo si;

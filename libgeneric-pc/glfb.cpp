@@ -185,6 +185,11 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mPlaneOK = false;
 	mOnPlane = false;
 	mDrmFd = -1;
+	mRenderFd = -1;
+	mSuspendReq = false;
+	mSuspended = false;
+	mWindow = NULL;
+	mContext = NULL;
 	mPlaneReq = NULL;
 	mPlaneFbo = mPlaneTex = 0;
 	mPlaneFboW = mPlaneFboH = 0;
@@ -316,11 +321,11 @@ void GLFbPC::initKeys()
 	mKeyMap['W'] = KEY_WWW;
 }
 
-void GLFramebuffer::run()
+/* the window, the GL context and what draws into it; called again after the display was given away */
+bool GLFbPC::createDisplay()
 {
-	int x = glfb_priv->mState.width;
-	int y = glfb_priv->mState.height;
-	hal_info("GLFB: GL thread starting x %d y %d\n", x, y);
+	int x = mState.width;
+	int y = mState.height;
 	SDL_SetAppMetadata("Neutrino", NULL, "neutrino");
 #ifdef SDL_HINT_KMSDRM_DISPLAY_PLANE
 	/* on KMS the window goes to an overlay plane, so that the primary one
@@ -334,7 +339,7 @@ void GLFramebuffer::run()
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
 		hal_info("GLFB: SDL_Init failed: %s\n", SDL_GetError());
-		_exit(1); /* Life is hard */
+		return false;
 	}
 	/* gamepads are opened as they show up, see pollEvents() */
 	if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
@@ -344,42 +349,89 @@ void GLFramebuffer::run()
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 	SDL_WindowFlags flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
-	if (glfb_priv->mFullscreen)
+	if (mFullscreen)
 		flags |= SDL_WINDOW_FULLSCREEN;
-	glfb_priv->mWindow = SDL_CreateWindow("Neutrino", x, y, flags);
-	if (!glfb_priv->mWindow)
+	mWindow = SDL_CreateWindow("Neutrino", x, y, flags);
+	if (!mWindow)
 	{
 		hal_info("GLFB: SDL_CreateWindow failed: %s\n", SDL_GetError());
-		_exit(1);
+		return false;
 	}
 	/* GLFB_MODE=<width>x<height>[@<rate>] picks the mode of the display for
 	 * the fullscreen window; without it the display stays as it is. On KMS
 	 * that is what the television prefers, 4K at whatever rate the board can
 	 * drive, while broadcasts want 50 Hz far more than they want pixels. */
 	const char *want = getenv("GLFB_MODE");
-	if (want && glfb_priv->mFullscreen)
+	if (want && mFullscreen)
 	{
 		int w = 0, h = 0;
 		float rate = 0;
 		if (sscanf(want, "%dx%d@%f", &w, &h, &rate) >= 2)
-			glfb_priv->applyDisplayMode(w, h, rate, "GLFB_MODE");
+			applyDisplayMode(w, h, rate, "GLFB_MODE");
 		else
 			hal_info("GLFB: GLFB_MODE=%s is not <width>x<height>[@<rate>]\n", want);
 	}
-	glfb_priv->mContext = SDL_GL_CreateContext(glfb_priv->mWindow);
-	if (!glfb_priv->mContext)
+	/* the mode the video system asked for, after the display was given away and taken back */
+	if (mWantW > 0 && mFullscreen)
+		mModeChange = true;
+	mContext = SDL_GL_CreateContext(mWindow);
+	if (!mContext)
 	{
 		hal_info("GLFB: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
-		_exit(1);
+		return false;
 	}
-	SDL_GL_MakeCurrent(glfb_priv->mWindow, glfb_priv->mContext);
+	SDL_GL_MakeCurrent(mWindow, mContext);
 	/* swap in step with the display; on KMS an unthrottled swap queues buffers faster than they are flipped */
 	if (!SDL_GL_SetSwapInterval(1))
 		hal_info("GLFB: SDL_GL_SetSwapInterval: %s\n", SDL_GetError());
 	SDL_HideCursor();
 	/* printable keys come in as text, translated with the keyboard layout of
 	 * the compositor or, on KMS, of the console */
-	SDL_StartTextInput(glfb_priv->mWindow);
+	SDL_StartTextInput(mWindow);
+	if (!setupGLObjects())
+	{
+		hal_info("GLFB: could not set up the OpenGL ES 2.0 objects\n");
+		return false;
+	}
+	if (!mUserEvent)
+		mUserEvent = SDL_RegisterEvents(1);
+	setupRender();
+	mReInit = true;
+	mOsdResize = true;
+	mState.blit = true;
+	return true;
+}
+
+/* everything createDisplay() made: with SDL's video gone, so is its hold on the display and the input devices */
+void GLFbPC::releaseDisplay()
+{
+	teardownRender();
+	if (mPlaneFbo)
+		glDeleteFramebuffers(1, &mPlaneFbo);
+	if (mPlaneTex)
+		glDeleteTextures(1, &mPlaneTex);
+	mPlaneFbo = mPlaneTex = 0;
+	mPlaneFboW = mPlaneFboH = 0;
+	mPlaneOK = false;
+	mOnPlane = false;
+	mDrmFd = -1;
+	releaseGLObjects();
+	SDL_GL_DestroyContext(mContext);
+	mContext = NULL;
+	SDL_DestroyWindow(mWindow);
+	mWindow = NULL;
+	mPadKey = 0;
+	memset(mPadAxis, 0, sizeof(mPadAxis));
+	SDL_QuitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_VIDEO);
+}
+
+void GLFramebuffer::run()
+{
+	int x = glfb_priv->mState.width;
+	int y = glfb_priv->mState.height;
+	hal_info("GLFB: GL thread starting x %d y %d\n", x, y);
+	if (!glfb_priv->createDisplay())
+		_exit(1); /* Life is hard */
 	/* 32bit FB depth, *2 because tuxtxt uses a shadow buffer */
 	/* room for the largest OSD, see setOSDResolution() */
 	int fbmem = (x > 1920 ? x : 1920) * (y > 1080 ? y : 1080) * 4 * 2;
@@ -387,13 +439,6 @@ void GLFramebuffer::run()
 	hal_info("GLFB: OSD buffer set to %d bytes at 0x%p\n", fbmem, osd_buf.data());
 	glfb_priv->mInitDone = true; /* signal that setup is finished */
 
-	if (!glfb_priv->setupGLObjects())
-	{
-		hal_info("GLFB: could not set up the OpenGL ES 2.0 objects\n");
-		_exit(1);
-	}
-	glfb_priv->mUserEvent = SDL_RegisterEvents(1);
-	glfb_priv->setupRender();
 	/* the shutdown joins this thread, so its signal must not land here */
 	sigset_t set;
 	sigemptyset(&set);
@@ -402,15 +447,53 @@ void GLFramebuffer::run()
 	pthread_sigmask(SIG_BLOCK, &set, NULL);
 	while (!glfb_priv->mShutDown)
 	{
+		if (glfb_priv->mSuspendReq)
+		{
+			/* another program has the display until resume() */
+			glfb_priv->releaseDisplay();
+			hal_info("GLFB: display given away\n");
+			glfb_priv->mSuspended = true;
+			while (glfb_priv->mSuspendReq && !glfb_priv->mShutDown)
+				usleep(20000);
+			if (glfb_priv->mShutDown)
+				break;
+			if (!glfb_priv->createDisplay())
+				_exit(1);
+			hal_info("GLFB: display taken back\n");
+			glfb_priv->mSuspended = false;
+			continue;
+		}
 		glfb_priv->pollEvents();
 		glfb_priv->render();
 	}
-	glfb_priv->teardownRender();
-	glfb_priv->releaseGLObjects();
-	SDL_GL_DestroyContext(glfb_priv->mContext);
-	SDL_DestroyWindow(glfb_priv->mWindow);
+	if (!glfb_priv->mSuspended)
+	{
+		glfb_priv->teardownRender();
+		glfb_priv->releaseGLObjects();
+		SDL_GL_DestroyContext(glfb_priv->mContext);
+		SDL_DestroyWindow(glfb_priv->mWindow);
+	}
 	SDL_Quit();
 	hal_info("GLFB: GL thread stopping\n");
+}
+
+void GLFramebuffer::suspend()
+{
+	if (glfb_priv->mSuspended)
+		return;
+	glfb_priv->mSuspendReq = true;
+	glfb_priv->wake();
+	while (!glfb_priv->mSuspended && !glfb_priv->mShutDown)
+		usleep(10000);
+}
+
+void GLFramebuffer::resume()
+{
+	if (!glfb_priv->mSuspended)
+		return;
+	glfb_priv->mSuspendReq = false;
+	while (glfb_priv->mSuspended && !glfb_priv->mShutDown)
+		usleep(10000);
 }
 
 static const char *vertex_shader =
@@ -1313,6 +1396,7 @@ bool GLFbPC::setupRender()
 	{
 		/* KMS without a display server: vaapi opens the render node itself */
 		drm.render_fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+		mRenderFd = drm.render_fd;
 #ifdef SDL_HINT_KMSDRM_DISPLAY_PLANE
 		const char *driver = SDL_GetCurrentVideoDriver();
 		const char *plane = getenv("GLFB_VIDEO_PLANE");
@@ -1507,6 +1591,9 @@ void GLFbPC::teardownRender()
 		mpv_render_context_free(mRender);
 		mRender = NULL;
 	}
+	if (mRenderFd >= 0)
+		close(mRenderFd);
+	mRenderFd = -1;
 	if (mVideoFbo)
 		glDeleteFramebuffers(1, &mVideoFbo);
 	if (mVideoTex)

@@ -141,6 +141,9 @@ class GLFbPC
 		 * that then only carries the OSD (Raspberry Pi and other KMS
 		 * hardware that scans DRM PRIME frames itself) */
 		bool mPlaneOK; /* set up: mpv hands its frames to the primary plane */
+		int mRenderFd; /* the render node mpv was given */
+		volatile bool mSuspendReq; /* suspend(): give the display away */
+		volatile bool mSuspended; /* the display is given away */
 		bool mOnPlane; /* the video that is playing is on the plane */
 		int mDrmFd;
 		struct _drmModeAtomicReq *mPlaneReq; /* mpv adds the plane's properties here */
@@ -180,6 +183,8 @@ class GLFbPC
 		static void renderUpdateCb(void *ctx);
 		bool setupGLObjects(); /* shaders, textures and stuff */
 		void releaseGLObjects();
+		bool createDisplay();
+		void releaseDisplay();
 		void drawSquare(float size, float x_factor = 1); /* do not be square */
 
 		void initKeys(); /* setup key bindings for window */
