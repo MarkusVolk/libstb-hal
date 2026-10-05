@@ -23,6 +23,7 @@
 #ifndef __glfb_priv__
 #define __glfb_priv__
 #include <stdint.h>
+#include <atomic>
 #include <OpenThreads/Mutex>
 #include <vector>
 #include <map>
@@ -112,6 +113,8 @@ class GLFbPC
 		bool mVideoValid; /* mpv has drawn a frame since the last video-params change */
 		bool mFramePending;
 		int input_fd;
+		std::atomic<int> mTermFd;
+		bool mTermSkipText; /* the character of a key with Ctrl or Alt went out already */
 		int64_t last_apts;
 		void run();
 
@@ -119,6 +122,9 @@ class GLFbPC
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
 		void handleKey(SDL_Keycode key);
 		void pushKey(int code);
+		void termKey(const SDL_KeyboardEvent &key);
+		void termText(const char *text);
+		void termWrite(uint32_t code, uint32_t unicode, uint32_t mods);
 		int mOsdBox[4]; /* x0, y0, x1, y1 of what the OSD shows; empty when x1 <= x0 */
 		bool mDirect; /* what the log said last about how the video is drawn */
 		int mLastPig[4]; /* what the last picture on the screen was drawn with */

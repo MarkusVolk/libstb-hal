@@ -87,6 +87,11 @@ void GLFramebuffer::blit()
 	glfb_priv->blit();
 }
 
+void GLFramebuffer::setTerminalFd(int fd)
+{
+	glfb_priv->mTermFd = fd;
+}
+
 bool GLFramebuffer::setOSDResolution(int x, int y)
 {
 	if (!glfb_priv->setOSDResolution(x, y))
@@ -170,6 +175,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mVideoValid = false;
 	mFramePending = false;
 	mPadKey = 0;
+	mTermFd = -1;
+	mTermSkipText = false;
 	mPadNext = 0;
 	memset(mOsdBox, 0, sizeof(mOsdBox));
 	mTexStale = false;
@@ -551,10 +558,17 @@ void GLFbPC::pollEvents()
 				padAxis(ev.gaxis.axis, ev.gaxis.value);
 				break;
 			case SDL_EVENT_KEY_DOWN:
-				if (!producesText(ev.key.key))
+				if (mTermFd >= 0)
+					termKey(ev.key);
+				else if (!producesText(ev.key.key))
 					handleKey(ev.key.key);
 				break;
 			case SDL_EVENT_TEXT_INPUT:
+				if (mTermFd >= 0)
+				{
+					termText(ev.text.text);
+					break;
+				}
 				for (const char *c = ev.text.text; c && *c; c++)
 					if (*c > 0x20 && *c < 0x7f)
 						handleKey((SDL_Keycode)*c);
@@ -583,6 +597,102 @@ void GLFbPC::pollEvents()
 				break;
 		}
 	} while (SDL_PollEvent(&ev));
+}
+
+void GLFbPC::termWrite(uint32_t code, uint32_t unicode, uint32_t mods)
+{
+	struct glfb_term_key k = { code, unicode, mods };
+	if (write(mTermFd, &k, sizeof(k)) != sizeof(k))
+		hal_info("GLFB::%s: terminal key lost: %m\n", __func__);
+}
+
+static int term_code(SDL_Keycode key)
+{
+	switch (key)
+	{
+		case SDLK_RETURN: case SDLK_KP_ENTER: return KEY_ENTER;
+		case SDLK_ESCAPE:	return KEY_ESC;
+		case SDLK_BACKSPACE:	return KEY_BACKSPACE;
+		case SDLK_TAB:		return KEY_TAB;
+		case SDLK_UP:		return KEY_UP;
+		case SDLK_DOWN:		return KEY_DOWN;
+		case SDLK_LEFT:		return KEY_LEFT;
+		case SDLK_RIGHT:	return KEY_RIGHT;
+		case SDLK_HOME:		return KEY_HOME;
+		case SDLK_END:		return KEY_END;
+		case SDLK_PAGEUP:	return KEY_PAGEUP;
+		case SDLK_PAGEDOWN:	return KEY_PAGEDOWN;
+		case SDLK_INSERT:	return KEY_INSERT;
+		case SDLK_DELETE:	return KEY_DELETE;
+		case SDLK_F1:		return KEY_F1;
+		case SDLK_F2:		return KEY_F2;
+		case SDLK_F3:		return KEY_F3;
+		case SDLK_F4:		return KEY_F4;
+		case SDLK_F5:		return KEY_F5;
+		case SDLK_F6:		return KEY_F6;
+		case SDLK_F7:		return KEY_F7;
+		case SDLK_F8:		return KEY_F8;
+		case SDLK_F9:		return KEY_F9;
+		case SDLK_F10:		return KEY_F10;
+		case SDLK_F11:		return KEY_F11;
+		case SDLK_F12:		return KEY_F12;
+		default:		return 0;
+	}
+}
+
+/* keys that type something arrive as text; with Ctrl or left Alt held there
+ * is no text, so the key itself goes out. AltGr is right Alt and types. */
+void GLFbPC::termKey(const SDL_KeyboardEvent &key)
+{
+	uint32_t mods = 0;
+	if (key.mod & SDL_KMOD_SHIFT)
+		mods |= GLFB_MOD_SHIFT;
+	if (key.mod & SDL_KMOD_CTRL)
+		mods |= GLFB_MOD_CTRL;
+	if (key.mod & SDL_KMOD_LALT)
+		mods |= GLFB_MOD_ALT;
+	mTermSkipText = false;
+	int code = term_code(key.key);
+	if (code)
+		termWrite(code, 0, mods);
+	else if ((mods & (GLFB_MOD_CTRL | GLFB_MOD_ALT)) && key.key >= 0x20 && key.key < 0x7f)
+	{
+		termWrite(0, key.key, mods);
+		mTermSkipText = true;
+	}
+}
+
+void GLFbPC::termText(const char *text)
+{
+	if (mTermSkipText)
+	{
+		mTermSkipText = false;
+		return;
+	}
+	const unsigned char *c = (const unsigned char *)text;
+	while (c && *c)
+	{
+		uint32_t cp;
+		int n;
+		if (*c < 0x80)
+			cp = *c, n = 0;
+		else if ((*c & 0xe0) == 0xc0)
+			cp = *c & 0x1f, n = 1;
+		else if ((*c & 0xf0) == 0xe0)
+			cp = *c & 0x0f, n = 2;
+		else if ((*c & 0xf8) == 0xf0)
+			cp = *c & 0x07, n = 3;
+		else
+		{
+			c++;
+			continue;
+		}
+		c++;
+		for (; n > 0 && (*c & 0xc0) == 0x80; n--, c++)
+			cp = (cp << 6) | (*c & 0x3f);
+		if (n == 0)
+			termWrite(0, cp, 0);
+	}
 }
 
 bool GLFbPC::producesText(SDL_Keycode key)
