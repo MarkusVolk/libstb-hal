@@ -374,6 +374,7 @@ cMpvEngine::cMpvEngine()
 	mVideo.w = mVideo.h = 0;
 	mVideo.sw = mVideo.sh = 0;
 	mVideo.aspect = 0;
+	mVideo.dar = 0;
 	mVideo.drmprime = false;
 	mVideo.fps = 0;
 	memset(&mLive, 0, sizeof(mLive));
@@ -422,6 +423,7 @@ cMpvEngine::cMpvEngine()
 	mpv_observe_property(h, 4, "idle-active", MPV_FORMAT_FLAG);
 	mpv_observe_property(h, 5, "time-pos", MPV_FORMAT_DOUBLE);
 	mpv_observe_property(h, 6, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
+	mpv_observe_property(h, 7, "video-dec-params/aspect", MPV_FORMAT_DOUBLE);
 	r = mpv_stream_cb_add_ro(h, LIVE_PROTOCOL, this, live_open);
 	if (r < 0)
 		hal_info("%s: no live TV, mpv_stream_cb_add_ro: %s\n", __func__, mpv_error_string(r));
@@ -524,6 +526,12 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 			}
 			else if (ev->reply_userdata == 6 && p->format == MPV_FORMAT_DOUBLE)
 				liveClock(*(double *)p->data);
+			else if (ev->reply_userdata == 7)
+			{
+				mVideoLock.lock();
+				mVideo.dar = (p->format == MPV_FORMAT_DOUBLE) ? *(double *)p->data : 0;
+				mVideoLock.unlock();
+			}
 			break;
 		}
 		default:
@@ -712,6 +720,7 @@ void cMpvEngine::updateVideoParams(mpv_node *node)
 	}
 	mVideoLock.lock();
 	v.fps = mVideo.fps;
+	v.dar = mVideo.dar;
 	if (v.valid != mVideo.valid || v.w != mVideo.w || v.h != mVideo.h)
 		hal_info("%s: video %dx%d%s\n", __func__, v.w, v.h, v.valid ? "" : " (none)");
 	mVideo = v;

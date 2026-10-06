@@ -66,9 +66,12 @@ class GLFbPC
 		bool setOSDResolution(int x, int y);
 		/* the mode of the display, where the window owns it */
 		void setDisplayMode(int w, int h, float rate);
-		void setOutputFormat(AVRational a, int h, int c)
+		/* stretched: the screen shows the whole signal at this aspect
+		 * ratio, as a 21:9 TV does with a 16:9 mode */
+		void setOutputFormat(AVRational a, int h, int c, bool stretched = false)
 		{
 			mOA = a;
+			mScreenAR = stretched ? a : av_make_q(0, 1);
 			*mY = h;
 			mCrop = c;
 			mReInit = true;
@@ -83,6 +86,8 @@ class GLFbPC
 		int _mY[2]; /* [0] = normal, [1] = fullscreen */
 		AVRational mOA; /* output window aspect ratio */
 		AVRational mVA; /* video aspect ratio */
+		AVRational mScreenAR; /* aspect ratio of a screen that stretches the window */
+		double mPar; /* width of a window pixel on that screen */
 		AVRational _mVA; /* for detecting changes in mVA */
 		bool mVAchanged;
 		float zoom; /* for cropping */
@@ -159,9 +164,11 @@ class GLFbPC
 		int mPlaneFboH;
 		double mMargins[4];
 		double mFit[2]; /* panscan and stretched aspect sent to mpv */
+		double mDar; /* of the video, as decoded */
 		bool setupPlane(void *drm_params);
 		bool renderPlane();
 		void planeMargins();
+		void setVideoFit(const double fit[2]);
 		int mWinW; /* the window in pixels, the viewport may be smaller */
 		int mWinH;
 		bool mTexStale; /* the video was drawn directly, mVideoTex has an old frame */

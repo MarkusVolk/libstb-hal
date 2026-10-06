@@ -159,6 +159,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mVA = mOA; /* initial aspect ratios are from the FB resolution, those */
 	_mVA = mVA; /* will be updated by the videoDecoder functions anyway */
 	mVAchanged = true;
+	mScreenAR = av_make_q(0, 1);
+	mPar = 1.0;
 	mCrop = DISPLAY_AR_MODE_PANSCAN;
 	zoom = 1.0;
 	xscale = 1.0;
@@ -199,6 +201,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mPlaneRedraw = true;
 	mMargins[0] = mMargins[1] = mMargins[2] = mMargins[3] = 0;
 	mFit[0] = mFit[1] = 0;
+	mDar = 0;
 	mOsdW = x;
 	mOsdH = y;
 	mOsdResize = false;
@@ -1059,17 +1062,31 @@ void GLFbPC::render()
 		*mY = y;
 		mWinW = x;
 		mWinH = y;
-		AVRational a = { x, y };
-		if (av_cmp_q(a, mOA) < 0)
-			*mY = x * mOA.den / mOA.num;
-		else if (av_cmp_q(a, mOA) > 0)
-			*mX = y * mOA.num / mOA.den;
-		xoff = (x - *mX) / 2;
-		yoff = (y - *mY) / 2;
-		hal_info("%s: reinit mX:%d mY:%d xoff:%d yoff:%d fs %d\n", __func__, *mX, *mY, xoff, yoff, mFullscreen);
 		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(mWindow));
 		if (mode)
 			hal_info("%s: display mode %dx%d at %.2f Hz\n", __func__, mode->w, mode->h, mode->refresh_rate);
+		/* the screen stretches the display mode, and the window with it */
+		mPar = 1.0;
+		if (mScreenAR.num > 0 && mode && mode->w > 0 && mode->h > 0)
+		{
+			mPar = av_q2d(mScreenAR) * mode->h / mode->w;
+			hal_info("%s: the screen shows %d:%d, a pixel is %.3f wide\n", __func__, mScreenAR.num, mScreenAR.den, mPar);
+		}
+		AVRational a = { x, y };
+		AVRational box = mOA;
+		if (mScreenAR.num > 0)
+		{
+			/* the video fills the window, the OSD keeps its shape on the screen */
+			av_reduce(&mOA.num, &mOA.den, x, y, INT_MAX);
+			box = av_d2q((double)mState.width / mState.height / mPar, 100000);
+		}
+		if (av_cmp_q(a, box) < 0)
+			*mY = x * box.den / box.num;
+		else if (av_cmp_q(a, box) > 0)
+			*mX = y * box.num / box.den;
+		xoff = (x - *mX) / 2;
+		yoff = (y - *mY) / 2;
+		hal_info("%s: reinit mX:%d mY:%d xoff:%d yoff:%d fs %d\n", __func__, *mX, *mY, xoff, yoff, mFullscreen);
 		/* mpv picks the frames to show by the display's rate; without it,
 		 * a 50 Hz programme on a 25 Hz display loses more than every other one */
 		cMpvEngine *e = cMpvEngine::getInstance();
@@ -1079,7 +1096,7 @@ void GLFbPC::render()
 		mViewY = yoff;
 		glViewport(xoff, yoff, *mX, *mY);
 		float aspect = static_cast<float>(*mX) / *mY;
-		float osdaspect = static_cast<float>(mOA.den) / mOA.num;
+		float osdaspect = static_cast<float>(box.den) / box.num;
 
 		/* glOrtho(aspect * -osdaspect, aspect * osdaspect, -1.0, 1.0, -1.0, 1.0) */
 		mState.xproj = 1.0 / (aspect * osdaspect);
@@ -1100,6 +1117,7 @@ void GLFbPC::render()
 		vp = engine->getVideoParams();
 	if (!vp.valid)
 		mVideoValid = false;
+	mDar = vp.valid ? vp.dar : 0;
 
 	/* The video on the plane below the window: the GPU only draws the OSD,
 	 * and only when it has changed. */
@@ -1252,6 +1270,13 @@ void GLFbPC::render()
 			engine->renderEnd();
 	}
 	uint64_t t_video = SDL_GetTicksNS();
+	/* on a screen that stretches the window, mpv narrows the picture by as
+	 * much; the GL quad crops it as it does any other */
+	if (mPar != 1.0 || mFit[0] != 0 || mFit[1] != 0)
+	{
+		double fit[2] = { 0, (mPar != 1.0 && vp.valid && vp.dar > 0) ? vp.dar / mPar : 0 };
+		setVideoFit(fit);
+	}
 	if (mVideoValid)
 	{
 		AVRational a;
@@ -1273,7 +1298,13 @@ void GLFbPC::render()
 	}
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glViewport(mViewX, mViewY, *mX, *mY);
+	/* on a screen that stretches the window, the video takes all of it and
+	 * the OSD only its part; the picture in the menus stays in the OSD's */
+	const bool video_full = mScreenAR.num > 0 && !(pig[0] > 0 && pig[1] > 0 && pig[2] > 0 && pig[3] > 0);
+	if (video_full)
+		glViewport(0, 0, mWinW, mWinH);
+	else
+		glViewport(mViewX, mViewY, *mX, *mY);
 	glClear(GL_COLOR_BUFFER_BIT);
 
 	if (mVAchanged)
@@ -1365,6 +1396,8 @@ void GLFbPC::render()
 			glEnable(GL_BLEND);
 		}
 	}
+	if (video_full)
+		glViewport(mViewX, mViewY, *mX, *mY);
 	drawOSD();
 
 	uint64_t t_draw = SDL_GetTicksNS();
@@ -1594,10 +1627,13 @@ void GLFbPC::planeMargins()
 	if (videoDecoder && videoDecoder->pig_x > 0 && videoDecoder->pig_y > 0 &&
 	    videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0 && mOsdW > 0 && mOsdH > 0)
 	{
-		m[0] = (double)videoDecoder->pig_x / mOsdW;
-		m[1] = (double)videoDecoder->pig_y / mOsdH;
-		m[2] = 1.0 - (double)(videoDecoder->pig_x + videoDecoder->pig_w) / mOsdW;
-		m[3] = 1.0 - (double)(videoDecoder->pig_y + videoDecoder->pig_h) / mOsdH;
+		/* the OSD's part of the window */
+		double ox = mWinW > 0 ? (double)mViewX / mWinW : 0, ow = mWinW > 0 ? (double)*mX / mWinW : 1;
+		double oy = mWinH > 0 ? (double)mViewY / mWinH : 0, oh = mWinH > 0 ? (double)*mY / mWinH : 1;
+		m[0] = ox + ow * videoDecoder->pig_x / mOsdW;
+		m[1] = oy + oh * videoDecoder->pig_y / mOsdH;
+		m[2] = 1.0 - ox - ow * (videoDecoder->pig_x + videoDecoder->pig_w) / mOsdW;
+		m[3] = 1.0 - oy - oh * (videoDecoder->pig_y + videoDecoder->pig_h) / mOsdH;
 		for (int i = 0; i < 4; i++)
 			m[i] = m[i] < 0 ? 0 : (m[i] > 1 ? 1 : m[i]);
 	}
@@ -1634,9 +1670,17 @@ void GLFbPC::planeMargins()
 		default:
 			break;
 	}
-	if (engine && memcmp(fit, mFit, sizeof(fit)))
+	if (fit[1] == 0 && mPar != 1.0 && mDar > 0)
+		fit[1] = mDar / mPar;
+	setVideoFit(fit);
+}
+
+void GLFbPC::setVideoFit(const double fit[2])
+{
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	if (engine && memcmp(fit, mFit, sizeof(mFit)))
 	{
-		memcpy(mFit, fit, sizeof(fit));
+		memcpy(mFit, fit, sizeof(mFit));
 		engine->setVideoFit(fit[0], fit[1]);
 	}
 }

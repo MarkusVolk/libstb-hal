@@ -67,6 +67,7 @@ class cMpvEngine : public OpenThreads::Thread
 			int sw; /* size of the coded picture */
 			int sh;
 			double aspect;
+			double dar; /* as decoded, without video-aspect-override */
 			double fps;
 			bool drmprime; /* the frames stay in the decoder's memory */
 		};
