@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <OpenThreads/Mutex>
+#include <pthread.h>
 
 typedef enum
 {
@@ -35,6 +36,15 @@ class cPlayback
 		std::string extractParam(const std::string &hdrs, const std::string &paramName);
 		void parseHeaders(const std::string &headers, std::vector<std::string> &fields, std::string &userAgent);
 		bool Stop(void);
+		/* fast forward and rewind: paused, jumping from keyframe to keyframe */
+		pthread_t trick_thread;
+		bool trick_active;
+		int trick_speed;
+		pthread_mutex_t trick_lock;
+		pthread_cond_t trick_cond;
+		static void *trickLoop(void *arg);
+		void trickStart(int speed);
+		void trickStop(void);
 	public:
 		cPlayback(int num = 0);
 		~cPlayback();

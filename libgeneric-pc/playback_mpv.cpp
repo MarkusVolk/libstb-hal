@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <map>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "playback_lib.h"
 #include "mpv_player.h"
@@ -50,12 +51,18 @@ cPlayback::cPlayback(int)
 	pm = PLAYMODE_FILE;
 	last_size = 0;
 	init_jump = -1;
+	trick_active = false;
+	trick_speed = 0;
+	pthread_mutex_init(&trick_lock, NULL);
+	pthread_cond_init(&trick_cond, NULL);
 }
 
 cPlayback::~cPlayback()
 {
 	hal_info("%s\n", __func__);
 	Close();
+	pthread_cond_destroy(&trick_cond);
+	pthread_mutex_destroy(&trick_lock);
 }
 
 bool cPlayback::Open(playmode_t PlayMode)
@@ -79,6 +86,7 @@ bool cPlayback::Stop(void)
 {
 	if (!engine)
 		return false;
+	trickStop();
 	engine->stop();
 	playing = false;
 	nPlaybackSpeed = 0;
@@ -244,16 +252,91 @@ bool cPlayback::SetSpeed(int speed)
 		return false;
 	if (speed == 0)
 	{
+		trickStop();
 		engine->setFlag("pause", true);
+	}
+	else if (speed == 1)
+	{
+		trickStop();
+		engine->setFlag("pause", false);
 	}
 	else
 	{
-		engine->setString("play-direction", speed < 0 ? "backward" : "forward");
-		engine->setDouble("speed", speed < 0 ? -speed : speed);
-		engine->setFlag("pause", false);
+		/* Playing at many times the speed, or backwards, makes mpv decode
+		 * every frame, which neither the hardware decoders nor a growing
+		 * recording keep up with. Like the receivers, stay paused and jump
+		 * from keyframe to keyframe instead. */
+		engine->setFlag("pause", true);
+		trickStart(speed);
 	}
 	nPlaybackSpeed = speed;
 	return true;
+}
+
+#define TRICK_INTERVAL_MS 500
+
+void *cPlayback::trickLoop(void *arg)
+{
+	cPlayback *p = (cPlayback *)arg;
+	pthread_mutex_lock(&p->trick_lock);
+	while (p->trick_active)
+	{
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += TRICK_INTERVAL_MS * 1000000L;
+		ts.tv_sec += ts.tv_nsec / 1000000000L;
+		ts.tv_nsec %= 1000000000L;
+		pthread_cond_timedwait(&p->trick_cond, &p->trick_lock, &ts);
+		if (!p->trick_active)
+			break;
+		int speed = p->trick_speed;
+		pthread_mutex_unlock(&p->trick_lock);
+
+		double pos = 0, dur = 0;
+		p->engine->getDouble("time-pos", pos);
+		p->engine->getDouble("duration", dur);
+		double target = pos + speed * TRICK_INTERVAL_MS / 1000.0;
+		/* stop short of the end of a growing recording, and at its start */
+		if (dur > 0 && target > dur - 1.0)
+			target = dur - 1.0;
+		if (target < 0)
+			target = 0;
+		if (target != pos)
+		{
+			char buf[32];
+			snprintf(buf, sizeof(buf), "%.3f", target);
+			const char *cmd[] = { "seek", buf, "absolute+keyframes", NULL };
+			p->engine->command(cmd);
+		}
+		pthread_mutex_lock(&p->trick_lock);
+	}
+	pthread_mutex_unlock(&p->trick_lock);
+	return NULL;
+}
+
+void cPlayback::trickStart(int speed)
+{
+	pthread_mutex_lock(&trick_lock);
+	trick_speed = speed;
+	bool running = trick_active;
+	trick_active = true;
+	pthread_mutex_unlock(&trick_lock);
+	if (!running && pthread_create(&trick_thread, NULL, trickLoop, this) != 0)
+	{
+		hal_info("%s: no thread for fast forward and rewind\n", __func__);
+		trick_active = false;
+	}
+}
+
+void cPlayback::trickStop(void)
+{
+	pthread_mutex_lock(&trick_lock);
+	bool running = trick_active;
+	trick_active = false;
+	pthread_cond_signal(&trick_cond);
+	pthread_mutex_unlock(&trick_lock);
+	if (running)
+		pthread_join(trick_thread, NULL);
 }
 
 bool cPlayback::GetSpeed(int &speed) const
