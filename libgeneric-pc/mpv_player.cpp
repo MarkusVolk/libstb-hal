@@ -366,7 +366,7 @@ void cMpvEngine::shutdown()
 cMpvEngine::cMpvEngine()
 	: mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
 	  mEof(false), mIdle(true), mLastError(0), mOwner(OWNER_NONE), mLiveSerial(0),
-	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
+	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveTarget(0.5), mLivePaused(false), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
 	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0)
 {
 	mStatsTime = 0;
@@ -1151,6 +1151,9 @@ void cMpvEngine::liveStart(const LiveParams &p)
 	mLive = p;
 	mOwner = OWNER_LIVE;
 	mLiveSpeed = 1.0;
+	mLiveTarget = 0.5;
+	bool was_held = mLivePaused;
+	mLivePaused = false;
 	mLiveClockTime = 0;
 	mLiveClockTicks = 0;
 	mTimePos = 0;
@@ -1160,6 +1163,9 @@ void cMpvEngine::liveStart(const LiveParams &p)
 
 	hal_info("%s: #%d vpid 0x%04x (type %d) apid 0x%04x (type %d) pcr 0x%04x\n", __func__,
 		 serial, p.vpid, p.vtype, p.apid, p.atype, p.pcrpid);
+	/* a new channel does not start held */
+	if (was_held)
+		setFlag("pause", false);
 
 	mStateLock.lock();
 	mLoaded = false;
@@ -1238,6 +1244,38 @@ bool cMpvEngine::liveActive()
 	return mOwner == OWNER_LIVE;
 }
 
+bool cMpvEngine::livePause(bool on)
+{
+	mLiveLock.lock();
+	bool live = (mOwner == OWNER_LIVE);
+	if (live && !on && mLivePaused)
+	{
+		/* the clock would play faster until the buffer is back at half a
+		 * second, eating up the delay the hold built */
+		double buffered = 0;
+		mLiveLock.unlock();
+		getDouble("demuxer-cache-duration", buffered);
+		mLiveLock.lock();
+		mLiveTarget = buffered > 0.5 ? buffered : 0.5;
+	}
+	if (live)
+		mLivePaused = on;
+	mLiveLock.unlock();
+	if (!live)
+		return false;
+	hal_info("%s: %s\n", __func__, on ? "held" : "playing on");
+	setFlag("pause", on);
+	return true;
+}
+
+int cMpvEngine::liveBufferedMs()
+{
+	double buffered = 0;
+	if (!liveActive() || !getDouble("demuxer-cache-duration", buffered))
+		return 0;
+	return (int)(buffered * 1000);
+}
+
 int64_t cMpvEngine::livePts()
 {
 	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(mLiveLock);
@@ -1275,10 +1313,11 @@ void cMpvEngine::playStats()
  */
 void cMpvEngine::liveClock(double buffered)
 {
-	static const double target = 0.5, deadband = 0.15, limit = 0.01;
+	static const double deadband = 0.15, limit = 0.01;
 
 	mLiveLock.lock();
-	bool live = (mOwner == OWNER_LIVE);
+	bool live = (mOwner == OWNER_LIVE) && !mLivePaused;
+	double target = mLiveTarget;
 	int64_t now = monotonic_ms();
 	bool due = (now - mLiveClockTime >= 1000);
 	if (live && due)

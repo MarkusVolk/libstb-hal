@@ -142,6 +142,10 @@ class cMpvEngine : public OpenThreads::Thread
 		 * here waits for mpv, a zap must not block. */
 		void liveDecoder(bool video, bool on);
 		bool liveActive();
+		/* hold the picture of a live session while it reads on into its
+		 * buffer; playing on keeps the delay that built up */
+		bool livePause(bool on);
+		int liveBufferedMs();
 		/* presentation time of what is played, in 90 kHz units as in the stream */
 		int64_t livePts();
 		/* for the stream callbacks */
@@ -177,6 +181,8 @@ class cMpvEngine : public OpenThreads::Thread
 		bool mLiveVideoOn;
 		bool mLiveAudioOn;
 		double mLiveSpeed;
+		double mLiveTarget;	/* seconds the clock keeps buffered */
+		bool mLivePaused;
 		int64_t mLiveClockTime;
 		int mLiveClockTicks;
 		double mTimePos;

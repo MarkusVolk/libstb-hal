@@ -210,6 +210,9 @@ class cVideo : public OpenThreads::Thread
 		bool ShowPicture(const char *fname);
 
 		void SetSyncMode(AVSYNC_TYPE mode);
+		/* live TV through mpv only */
+		bool LivePause(bool on);
+		int LiveBufferedMs(void);
 		bool SetCECMode(VIDEO_HDMI_CEC_MODE);
 		void SetCECAutoView(bool);
 		void SetCECAutoStandby(bool);

@@ -1365,6 +1365,18 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 	return true;
 }
 
+bool cVideo::LivePause(bool on)
+{
+	cMpvEngine *engine = HAL_live_mpv ? cMpvEngine::getInstance() : NULL;
+	return engine && engine->livePause(on);
+}
+
+int cVideo::LiveBufferedMs(void)
+{
+	cMpvEngine *engine = HAL_live_mpv ? cMpvEngine::getInstance() : NULL;
+	return engine ? engine->liveBufferedMs() : 0;
+}
+
 int64_t cVideo::GetPTS(void)
 {
 	int64_t pts = 0;
