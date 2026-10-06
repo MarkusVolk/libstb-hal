@@ -120,8 +120,14 @@ class GLFbPC
 
 		void render(); /* actual render function */
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
-		void handleKey(SDL_Keycode key);
+		void handleKey(SDL_Keycode key, SDL_Scancode scan = SDL_SCANCODE_UNKNOWN, bool repeat = false);
 		void pushKey(int code);
+		void sendKey(int code, int value);
+		/* keys of the keyboard that neutrino was told are down, released
+		 * when the keyboard releases them; a held key repeats as held */
+		std::map<SDL_Scancode, int> mHeld;
+		SDL_Scancode mTextScan; /* the key whose character comes as text input next */
+		bool mTextRepeat;
 		void termKey(const SDL_KeyboardEvent &key);
 		void termText(const char *text);
 		void termWrite(uint32_t code, uint32_t unicode, uint32_t mods);

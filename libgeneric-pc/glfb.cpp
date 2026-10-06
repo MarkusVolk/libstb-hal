@@ -177,6 +177,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mPadKey = 0;
 	mTermFd = -1;
 	mTermSkipText = false;
+	mTextScan = SDL_SCANCODE_UNKNOWN;
+	mTextRepeat = false;
 	mPadNext = 0;
 	memset(mOsdBox, 0, sizeof(mOsdBox));
 	mTexStale = false;
@@ -658,8 +660,23 @@ void GLFbPC::pollEvents()
 				if (mTermFd >= 0)
 					termKey(ev.key);
 				else if (!producesText(ev.key.key))
-					handleKey(ev.key.key);
+					handleKey(ev.key.key, ev.key.scancode, ev.key.repeat);
+				else
+				{
+					mTextScan = ev.key.scancode;
+					mTextRepeat = ev.key.repeat;
+				}
 				break;
+			case SDL_EVENT_KEY_UP:
+			{
+				std::map<SDL_Scancode, int>::iterator h = mHeld.find(ev.key.scancode);
+				if (h != mHeld.end())
+				{
+					sendKey(h->second, 0);
+					mHeld.erase(h);
+				}
+				break;
+			}
 			case SDL_EVENT_TEXT_INPUT:
 				if (mTermFd >= 0)
 				{
@@ -667,10 +684,16 @@ void GLFbPC::pollEvents()
 					break;
 				}
 				for (const char *c = ev.text.text; c && *c; c++)
+				{
+					/* only the first character belongs to the key that was pressed */
+					SDL_Scancode scan = (c == ev.text.text) ? mTextScan : SDL_SCANCODE_UNKNOWN;
 					if (*c > 0x20 && *c < 0x7f)
-						handleKey((SDL_Keycode)*c);
+						handleKey((SDL_Keycode)*c, scan, mTextRepeat);
 					else if (*c == ' ')
-						handleKey(SDLK_SPACE);
+						handleKey(SDLK_SPACE, scan, mTextRepeat);
+				}
+				mTextScan = SDL_SCANCODE_UNKNOWN;
+				mTextRepeat = false;
 				break;
 			case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
 				mReInit = true;
@@ -807,7 +830,7 @@ bool GLFbPC::producesText(SDL_Keycode key)
 	}
 }
 
-void GLFbPC::handleKey(SDL_Keycode key)
+void GLFbPC::handleKey(SDL_Keycode key, SDL_Scancode scan, bool repeat)
 {
 	hal_debug("GLFB::%s: 0x%x\n", __func__, (unsigned int)key);
 	/* on KMS there is no desktop to leave the fullscreen window for */
@@ -822,7 +845,28 @@ void GLFbPC::handleKey(SDL_Keycode key)
 	std::map<SDL_Keycode, int>::const_iterator i = mKeyMap.find(key);
 	if (i == mKeyMap.end())
 		return;
-	pushKey(i->second);
+	if (scan == SDL_SCANCODE_UNKNOWN)
+	{
+		pushKey(i->second);
+		return;
+	}
+	/* Down, held and up as the keyboard has them: neutrino then repeats
+	 * only the keys it repeats on a remote control. Pressing and releasing
+	 * at once made every repeat of a held key a press of its own. */
+	sendKey(i->second, repeat ? 2 : 1);
+	mHeld[scan] = i->second;
+}
+
+void GLFbPC::sendKey(int code, int value)
+{
+	struct input_event iev;
+	memset(&iev, 0, sizeof(iev));
+	iev.code = code;
+	iev.value = value;
+	iev.type = EV_KEY;
+	gettimeofday(&iev.time, NULL);
+	hal_debug("GLFB::%s: 0x%x %d\n", __func__, iev.code, value);
+	write(input_fd, &iev, sizeof(iev));
 }
 
 void GLFbPC::pushKey(int code)
