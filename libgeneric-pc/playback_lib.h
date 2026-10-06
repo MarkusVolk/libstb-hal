@@ -74,6 +74,7 @@ class cPlayback
 		void RequestAbort(void);
 		bool IsPlaying(void);
 		uint64_t GetReadCount(void);
+		int GetBufferedMs(void); /* how far the buffer reaches beyond what is shown */
 		bool GetLastOpenError(int &code, std::string &message);
 		void FindAllSubs(int *pids, unsigned int *supported, unsigned int *numpida, std::string *language);
 		void FindAllSubs(uint16_t *pids, unsigned short *supported, uint16_t *numpida, std::string *language);

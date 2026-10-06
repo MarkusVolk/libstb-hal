@@ -558,6 +558,14 @@ uint64_t cPlayback::GetReadCount(void)
 	return 0;
 }
 
+int cPlayback::GetBufferedMs(void)
+{
+	double d = 0;
+	if (!engine || !playing || !engine->getDouble("demuxer-cache-duration", d))
+		return 0;
+	return (int)(d * 1000);
+}
+
 bool cPlayback::GetLastOpenError(int &code, std::string &message)
 {
 	code = 0;
