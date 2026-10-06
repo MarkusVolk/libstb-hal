@@ -118,12 +118,11 @@ typedef enum
 	VIDEO_STD_MAX
 } VIDEO_STD;
 
-/* not used, for dummy functions */
 typedef enum
 {
 	VIDEO_HDMI_CEC_MODE_OFF = 0,
-	VIDEO_HDMI_CEC_MODE_TUNER,
-	VIDEO_HDMI_CEC_MODE_RECORDER
+	VIDEO_HDMI_CEC_MODE_TUNER = 3,
+	VIDEO_HDMI_CEC_MODE_RECORDER = 1
 } VIDEO_HDMI_CEC_MODE;
 
 typedef enum
@@ -211,11 +210,11 @@ class cVideo : public OpenThreads::Thread
 		bool ShowPicture(const char *fname);
 
 		void SetSyncMode(AVSYNC_TYPE mode);
-		bool SetCECMode(VIDEO_HDMI_CEC_MODE) { return true; };
-		void SetCECAutoView(bool) { return; };
-		void SetCECAutoStandby(bool) { return; };
-		int GetAudioDestination() { return 0; };
-		void SetAudioDestination(int /*audio_dest*/) { return; };
+		bool SetCECMode(VIDEO_HDMI_CEC_MODE);
+		void SetCECAutoView(bool);
+		void SetCECAutoStandby(bool);
+		int GetAudioDestination();
+		void SetAudioDestination(int audio_dest);
 		void StopPicture();
 		void Standby(unsigned int bOn);
 		void Pig(int x, int y, int w, int h, int osd_w = 1064, int osd_h = 600, int startx = 0, int starty = 0, int endx = 1279, int endy = 719);

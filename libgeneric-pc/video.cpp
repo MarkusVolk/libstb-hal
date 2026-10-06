@@ -49,6 +49,7 @@ extern "C" {
 #include "glfb_priv.h"
 #include "mpv_player.h"
 #include "hal_debug.h"
+#include "hdmi_cec.h"
 
 #include <mpv/client.h>
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_VIDEO, this, args)
@@ -146,6 +147,8 @@ cVideo::cVideo(int, void *, void *, unsigned int)
 
 cVideo::~cVideo(void)
 {
+	if (hdmi_cec::getInstance()->standby_cec_activ)
+		hdmi_cec::getInstance()->SetCECState(true);
 	Stop();
 	/* ouch :-( */
 	videoDecoder = NULL;
@@ -560,8 +563,34 @@ void cVideo::StopPicture()
 	still_m.unlock();
 }
 
-void cVideo::Standby(unsigned int)
+void cVideo::Standby(unsigned int bOn)
 {
+	hdmi_cec::getInstance()->SetCECState(bOn);
+}
+
+bool cVideo::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)
+{
+	return hdmi_cec::getInstance()->SetCECMode(_deviceType);
+}
+
+void cVideo::SetCECAutoStandby(bool state)
+{
+	hdmi_cec::getInstance()->SetCECAutoStandby(state);
+}
+
+void cVideo::SetCECAutoView(bool state)
+{
+	hdmi_cec::getInstance()->SetCECAutoView(state);
+}
+
+int cVideo::GetAudioDestination()
+{
+	return (int)hdmi_cec::getInstance()->GetAudioDestination();
+}
+
+void cVideo::SetAudioDestination(int audio_dest)
+{
+	hdmi_cec::getInstance()->SetAudioDestination(audio_dest);
 }
 
 int cVideo::getBlank(void)

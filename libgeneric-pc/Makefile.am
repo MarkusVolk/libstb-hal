@@ -35,5 +35,6 @@ libgeneric_la_SOURCES = \
 	init.cpp \
 	record.cpp \
 	glfb.cpp \
+	hdmi_cec.cpp \
 	mpv_player.cpp \
 	playback_mpv.cpp
