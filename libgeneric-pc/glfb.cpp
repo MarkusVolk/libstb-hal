@@ -293,6 +293,19 @@ void GLFbPC::initKeys()
 	mKeyMap[SDLK_MINUS]    = KEY_VOLUMEDOWN;
 	mKeyMap[SDLK_KP_MINUS] = KEY_VOLUMEDOWN;
 	mKeyMap[SDLK_PERIOD]   = KEY_MUTE;
+	/* the media keys of keyboards and remote controls that are keyboards */
+	mKeyMap[SDLK_VOLUMEUP]   = KEY_VOLUMEUP;
+	mKeyMap[SDLK_VOLUMEDOWN] = KEY_VOLUMEDOWN;
+	mKeyMap[SDLK_MUTE]       = KEY_MUTE;
+	mKeyMap[SDLK_MEDIA_PLAY]           = KEY_PLAY;
+	mKeyMap[SDLK_MEDIA_PAUSE]          = KEY_PAUSE;
+	mKeyMap[SDLK_MEDIA_PLAY_PAUSE]     = KEY_PLAYPAUSE;
+	mKeyMap[SDLK_MEDIA_STOP]           = KEY_STOP;
+	mKeyMap[SDLK_MEDIA_RECORD]         = KEY_RECORD;
+	mKeyMap[SDLK_MEDIA_FAST_FORWARD]   = KEY_FORWARD;
+	mKeyMap[SDLK_MEDIA_REWIND]         = KEY_REWIND;
+	mKeyMap[SDLK_MEDIA_NEXT_TRACK]     = KEY_NEXT;
+	mKeyMap[SDLK_MEDIA_PREVIOUS_TRACK] = KEY_PREVIOUS;
 	mKeyMap[SDLK_A] = KEY_AUDIO;
 	mKeyMap[SDLK_E] = KEY_EPG;
 	//     [SDLK_F]  is reserved to toggle fullscreen;
