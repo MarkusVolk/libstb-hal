@@ -403,7 +403,9 @@ bool GLFbPC::createDisplay()
 	/* swap in step with the display; on KMS an unthrottled swap queues buffers faster than they are flipped */
 	if (!SDL_GL_SetSwapInterval(1))
 		hal_info("GLFB: SDL_GL_SetSwapInterval: %s\n", SDL_GetError());
-	SDL_HideCursor();
+	/* the pointer is hidden in fullscreen only; in a window on a desktop
+	 * it would vanish while crossing it */
+	mFullscreen ? SDL_HideCursor() : SDL_ShowCursor();
 	/* printable keys come in as text, translated with the keyboard layout of
 	 * the compositor or, on KMS, of the console */
 	SDL_StartTextInput(mWindow);
@@ -704,10 +706,12 @@ void GLFbPC::pollEvents()
 			case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
 				mFullscreen = true;
 				mReInit = true;
+				SDL_HideCursor();
 				break;
 			case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
 				mFullscreen = false;
 				mReInit = true;
+				SDL_ShowCursor();
 				break;
 			case SDL_EVENT_QUIT:
 				/* the window is all there is of neutrino on a desktop, closing
