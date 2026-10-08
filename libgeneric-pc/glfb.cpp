@@ -304,8 +304,7 @@ void GLFbPC::initKeys()
 	mKeyMap[SDLK_MUTE]       = KEY_MUTE;
 	mKeyMap[SDLK_MEDIA_PLAY]           = KEY_PLAY;
 	mKeyMap[SDLK_MEDIA_PAUSE]          = KEY_PAUSE;
-	/* one key for both: pause toggles in the player and starts timeshift in live TV */
-	mKeyMap[SDLK_MEDIA_PLAY_PAUSE]     = KEY_PAUSE;
+	mKeyMap[SDLK_MEDIA_PLAY_PAUSE]     = KEY_PLAYPAUSE;
 	mKeyMap[SDLK_MEDIA_STOP]           = KEY_STOP;
 	mKeyMap[SDLK_MEDIA_RECORD]         = KEY_RECORD;
 	mKeyMap[SDLK_MEDIA_FAST_FORWARD]   = KEY_FORWARD;
