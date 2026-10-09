@@ -569,6 +569,9 @@ void cVideo::StopPicture()
 void cVideo::Standby(unsigned int bOn)
 {
 	hdmi_cec::getInstance()->SetCECState(bOn);
+	/* under a desktop the window has no business staying around in standby */
+	if (glfb_priv && (getenv("WAYLAND_DISPLAY") || getenv("DISPLAY")))
+		glfb_priv->setHidden(bOn);
 }
 
 bool cVideo::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)

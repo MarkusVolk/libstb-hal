@@ -66,6 +66,8 @@ class GLFbPC
 		bool setOSDResolution(int x, int y);
 		/* the mode of the display, where the window owns it */
 		void setDisplayMode(int w, int h, float rate);
+		/* the window leaves the desktop in standby and comes back on wakeup */
+		void setHidden(bool hidden);
 		/* stretched: the screen shows the whole signal at this aspect
 		 * ratio, as a 21:9 TV does with a 16:9 mode */
 		void setOutputFormat(AVRational a, int h, int c, bool stretched = false)
@@ -99,6 +101,8 @@ class GLFbPC
 		OpenThreads::Mutex mReInitLock;
 		bool mShutDown; /* if set main loop is left */
 		bool mInitDone; /* condition predicate */
+		volatile bool mHideReq; /* setHidden(): the window is wanted hidden */
+		bool mHidden; /* the window is hidden */
 		// OpenThreads::Condition mInitCond; /* condition variable for init */
 		// mutable OpenThreads::Mutex mMutex; /* lock our data */
 

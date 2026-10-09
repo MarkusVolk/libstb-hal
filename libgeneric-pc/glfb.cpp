@@ -120,6 +120,12 @@ bool GLFbPC::setOSDResolution(int x, int y)
 	return true;
 }
 
+void GLFbPC::setHidden(bool hidden)
+{
+	mHideReq = hidden;
+	wake();
+}
+
 void GLFbPC::setDisplayMode(int w, int h, float rate)
 {
 	mReInitLock.lock();
@@ -146,7 +152,7 @@ void GLFbPC::applyDisplayMode(int w, int h, float rate, const char *who)
 		hal_info("GLFB: no display mode for %dx%d at %.2f Hz (%s): %s\n", w, h, rate, who, SDL_GetError());
 }
 
-GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mShutDown(false), mInitDone(false)
+GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mShutDown(false), mInitDone(false), mHideReq(false), mHidden(false)
 {
 	osd_buf = &buf;
 	mState.width = x;
@@ -623,6 +629,15 @@ void GLFbPC::releaseGLObjects()
 void GLFbPC::pollEvents()
 {
 	SDL_Event ev;
+	if (mHideReq != mHidden)
+	{
+		mHidden = mHideReq;
+		if (mHidden)
+			SDL_HideWindow(mWindow);
+		else
+			SDL_ShowWindow(mWindow);
+		hal_info("GLFB::%s: window %s\n", __func__, mHidden ? "hidden" : "shown");
+	}
 	/* the software live TV decoder still paces the loop, everything else just waits */
 	int timeout = 250;
 	if (!HAL_live_mpv && !mVideoValid && videoDecoder)
@@ -1020,6 +1035,8 @@ int sleep_us = 30000;
 
 void GLFbPC::render()
 {
+	if (mHidden)
+		return;
 	/* where the time of a frame goes, for the debug output */
 	static uint64_t stat_since, stat_video, stat_draw, stat_swap, stat_max;
 	static int stat_frames;
