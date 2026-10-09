@@ -25,6 +25,7 @@ typedef enum
 
 
 #if BOXMODEL_VUPLUS_ARM
+#define HDMI_COLORIMETRY_HAS_BT470 1
 typedef enum
 {
 	HDMI_COLORIMETRY_AUTO,
@@ -82,7 +83,8 @@ typedef enum
 	DISPLAY_AR_14_9,
 	DISPLAY_AR_16_9,
 	DISPLAY_AR_20_9,
-	DISPLAY_AR_RAW
+	DISPLAY_AR_RAW,
+	DISPLAY_AR_21_9
 } DISPLAY_AR;
 
 typedef enum
@@ -109,31 +111,7 @@ typedef enum
 	VIDEO_PLAY_MOTION_NO_SYNC
 } VIDEO_PLAY_MODE;
 
-typedef enum
-{
-	VIDEO_STD_NTSC,
-	VIDEO_STD_SECAM,
-	VIDEO_STD_PAL,
-	VIDEO_STD_480P,
-	VIDEO_STD_576P,
-	VIDEO_STD_720P60,
-	VIDEO_STD_1080I60,
-	VIDEO_STD_720P50,
-	VIDEO_STD_1080I50,
-	VIDEO_STD_1080P30,
-	VIDEO_STD_1080P24,
-	VIDEO_STD_1080P25,
-	VIDEO_STD_1080P50,
-	VIDEO_STD_1080P60,
-	VIDEO_STD_1080P2397,
-	VIDEO_STD_1080P2997,
-	VIDEO_STD_2160P24,
-	VIDEO_STD_2160P25,
-	VIDEO_STD_2160P30,
-	VIDEO_STD_2160P50,
-	VIDEO_STD_AUTO,
-	VIDEO_STD_MAX = VIDEO_STD_AUTO
-} VIDEO_STD;
+#include "video_std.h"
 
 typedef enum
 {
@@ -282,6 +260,9 @@ class cVideo
 		int StopVBI(void) { return 0; };
 		void SetDemux(cDemux *dmx);
 		void SetHDMIColorimetry(HDMI_COLORIMETRY hdmi_colorimetry);
+		/* live TV is not held here, the timeshift takes that */
+		bool LivePause(bool) { return false; }
+		int LiveBufferedMs(void) { return 0; }
 		bool GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get_video = true, bool get_osd = false, bool scale_to_video = false);
 };
 

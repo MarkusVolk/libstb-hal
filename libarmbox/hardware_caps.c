@@ -17,6 +17,7 @@
 #include <sys/ioctl.h>
 
 #include <hardware_caps.h>
+#include "video_std.h"
 
 static int initialized = 0;
 static hw_caps_t caps;
@@ -27,6 +28,30 @@ hw_caps_t *get_hwcaps(void)
 		return &caps;
 
 	memset(&caps, 0, sizeof(hw_caps_t));
+	caps.video_std_mask = VIDEO_STD_BIT(VIDEO_STD_PAL) | VIDEO_STD_BIT(VIDEO_STD_576P) |
+		VIDEO_STD_BIT(VIDEO_STD_720P50) | VIDEO_STD_BIT(VIDEO_STD_720P60) |
+		VIDEO_STD_BIT(VIDEO_STD_1080I50) | VIDEO_STD_BIT(VIDEO_STD_1080I60) |
+		VIDEO_STD_BIT(VIDEO_STD_1080P24) | VIDEO_STD_BIT(VIDEO_STD_1080P25) | VIDEO_STD_BIT(VIDEO_STD_1080P50) |
+		VIDEO_STD_BIT(VIDEO_STD_2160P24) | VIDEO_STD_BIT(VIDEO_STD_2160P25) |
+		VIDEO_STD_BIT(VIDEO_STD_2160P30) | VIDEO_STD_BIT(VIDEO_STD_2160P50);
+	caps.video_std_default = VIDEO_STD_1080P50;
+	caps.osd_default_height = 1080;
+	caps.can_osd_1080 = 1;
+	caps.can_psi = 1;
+	caps.can_dd_passthrough = 1;
+	caps.can_zapping_mode = 1;
+	caps.video_needs_blank_frame = 1;
+	caps.fb_wait_vsync = 1;
+	caps.can_ci_clock = 1;
+	caps.ci_clock_max = 7;
+	caps.can_record_bufsize = 1;
+	strcpy(caps.rc_device, "/dev/input/event1");
+	strcpy(caps.rc_device_fallback, "/dev/input/event0");
+	caps.rc_scan_evdev = 1;
+	caps.rc_e2_keys = 1;
+	strcpy(caps.display_dev, "/dev/dbox/oled0");
+	caps.has_internal_mmc = 1;
+	caps.can_ofgwrite = 1;
 
 	caps.pip_devs = 0;
 	if (access("/dev/dvb/adapter0/video1", F_OK) != -1)
@@ -60,6 +85,17 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "VU+");
 	strcpy(caps.boxname, "SOLO4K");
 	strcpy(caps.boxarch, "BCM7376");
+	caps.can_hdmi_colorimetry = 1;
+	caps.can_ci_delay = 1;
+	caps.ci_clock_max = 12;
+	caps.can_ci_rpr = 1;
+	caps.rc_has_playpause = 1;
+	caps.rc_has_separate_play = 1;
+	caps.tuner_needs_setup_menu = 1;
+	caps.display_can_mirror_video = 1;
+	caps.display_scroll_speed = 2;
+	caps.nim_socket_vuplus_format = 1;
+	caps.multiboot_first_partition = 5;
 #endif
 #if BOXMODEL_VUDUO4K
 	caps.has_CI = 2;
@@ -83,6 +119,17 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "VU+");
 	strcpy(caps.boxname, "DUO4K");
 	strcpy(caps.boxarch, "BCM7278");
+	caps.can_hdmi_colorimetry = 1;
+	caps.can_ci_delay = 1;
+	caps.ci_clock_max = 12;
+	caps.can_ci_rpr = 1;
+	caps.rc_has_playpause = 1;
+	caps.rc_has_separate_play = 1;
+	caps.tuner_needs_setup_menu = 1;
+	caps.display_can_mirror_video = 1;
+	caps.display_scroll_speed = 2;
+	caps.nim_socket_vuplus_format = 1;
+	caps.multiboot_first_partition = 10;
 #endif
 #if BOXMODEL_VUDUO4KSE
 	caps.has_CI = 2;
@@ -105,6 +152,16 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "VU+");
 	strcpy(caps.boxname, "DUO4KSE");
 	strcpy(caps.boxarch, "BCM7444S");
+	caps.can_hdmi_colorimetry = 1;
+	caps.can_ci_delay = 1;
+	caps.ci_clock_max = 12;
+	caps.can_ci_rpr = 1;
+	caps.rc_has_playpause = 1;
+	caps.rc_has_separate_play = 1;
+	caps.tuner_needs_setup_menu = 1;
+	caps.display_can_mirror_video = 1;
+	caps.display_scroll_speed = 2;
+	caps.nim_socket_vuplus_format = 1;
 #endif
 #if BOXMODEL_VUULTIMO4K
 	caps.has_CI = 2;
@@ -128,6 +185,17 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "VU+");
 	strcpy(caps.boxname, "ULTIMO4K");
 	strcpy(caps.boxarch, "BCM7444S");
+	caps.can_hdmi_colorimetry = 1;
+	caps.can_ci_delay = 1;
+	caps.ci_clock_max = 12;
+	caps.can_ci_rpr = 1;
+	caps.rc_has_playpause = 1;
+	caps.rc_has_separate_play = 1;
+	caps.tuner_needs_setup_menu = 1;
+	caps.display_can_mirror_video = 1;
+	caps.display_scroll_speed = 2;
+	caps.nim_socket_vuplus_format = 1;
+	caps.multiboot_first_partition = 5;
 #endif
 #if BOXMODEL_VUZERO4K
 	caps.has_CI = 1;
@@ -148,6 +216,15 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "VU+");
 	strcpy(caps.boxname, "ZERO4K");
 	strcpy(caps.boxarch, "BCM72604");
+	caps.can_hdmi_colorimetry = 1;
+	caps.can_ci_delay = 1;
+	caps.ci_clock_max = 12;
+	caps.can_ci_rpr = 1;
+	caps.rc_has_playpause = 1;
+	caps.rc_has_separate_play = 1;
+	caps.tuner_needs_setup_menu = 1;
+	caps.nim_socket_vuplus_format = 1;
+	caps.multiboot_first_partition = 8;
 #endif
 #if BOXMODEL_VUUNO4KSE
 	caps.has_CI = 1;
@@ -171,6 +248,17 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "VU+");
 	strcpy(caps.boxname, "UNO4KSE");
 	strcpy(caps.boxarch, "BCM7252S");
+	caps.can_hdmi_colorimetry = 1;
+	caps.can_ci_delay = 1;
+	caps.ci_clock_max = 12;
+	caps.can_ci_rpr = 1;
+	caps.rc_has_playpause = 1;
+	caps.rc_has_separate_play = 1;
+	caps.tuner_needs_setup_menu = 1;
+	caps.display_can_mirror_video = 1;
+	caps.display_scroll_speed = 1;
+	caps.nim_socket_vuplus_format = 1;
+	caps.multiboot_first_partition = 5;
 #endif
 #if BOXMODEL_VUUNO4K
 	caps.has_CI = 1;
@@ -191,6 +279,15 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "VU+");
 	strcpy(caps.boxname, "UNO4K");
 	strcpy(caps.boxarch, "BCM7252S");
+	caps.can_hdmi_colorimetry = 1;
+	caps.can_ci_delay = 1;
+	caps.ci_clock_max = 12;
+	caps.can_ci_rpr = 1;
+	caps.rc_has_playpause = 1;
+	caps.rc_has_separate_play = 1;
+	caps.tuner_needs_setup_menu = 1;
+	caps.nim_socket_vuplus_format = 1;
+	caps.multiboot_first_partition = 5;
 #endif
 #if BOXMODEL_HD51
 	caps.has_CI = 1;
@@ -212,6 +309,10 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "AX");
 	strcpy(caps.boxname, "HD51");
 	strcpy(caps.boxarch, "BCM7251S");
+	caps.rc_has_playpause = 1;
+	caps.pip_warmup = 1;
+	caps.can_boxmode = 1;
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_BRE2ZE4K
 	caps.has_CI = 1;
@@ -233,6 +334,11 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "WWIO");
 	strcpy(caps.boxname, "BRE2ZE4K");
 	strcpy(caps.boxarch, "BCM7251S");
+	caps.rc_has_playpause = 1;
+	caps.pip_warmup = 1;
+	caps.display_has_channel_number = 1;
+	caps.can_boxmode = 1;
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_H7
 	caps.has_CI = 1;
@@ -254,6 +360,13 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "AirDigital");
 	strcpy(caps.boxname, "Zgemma H7");
 	strcpy(caps.boxarch, "BCM7251S");
+	caps.rc_has_playpause = 1;
+	caps.pip_warmup = 1;
+	caps.display_has_channel_number = 1;
+	caps.can_boxmode = 1;
+	strcpy(caps.rc_device, "/dev/input/event2");
+	strcpy(caps.rc_device_fallback, "/dev/input/event1");
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_E4HDULTRA
 	caps.has_CI = 1;
@@ -276,6 +389,13 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "AXAS");
 	strcpy(caps.boxname, "E4HD 4K ULTRA");
 	strcpy(caps.boxarch, "BCM7252S");
+	caps.rc_has_playpause = 1;
+	caps.pip_warmup = 1;
+	caps.standby_zappingmode_mute = 1;
+	caps.rc_tvradio_combined = 1;
+	strcpy(caps.display_dev, "/dev/null");
+	caps.tuner_voltage_off_at_init = 1;
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_PROTEK4K
 	caps.has_CI = 1;
@@ -298,6 +418,11 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "Protek");
 	strcpy(caps.boxname, "Protek 4K UHD");
 	strcpy(caps.boxarch, "BCM7252S");
+	caps.rc_has_playpause = 1;
+	caps.rc_tvradio_combined = 1;
+	strcpy(caps.display_dev, "/dev/null");
+	caps.tuner_voltage_off_at_init = 1;
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_HD60
 	caps.has_CI = 0;
@@ -319,6 +444,8 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "AX");
 	strcpy(caps.boxname, "HD60");
 	strcpy(caps.boxarch, "HI3798MV200");
+	caps.rc_has_playpause = 1;
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_HD61
 	caps.has_CI = 2;
@@ -338,6 +465,9 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "AX");
 	strcpy(caps.boxname, "HD61");
 	strcpy(caps.boxarch, "HI3798MV200");
+	caps.rc_has_playpause = 1;
+	caps.rc_tvradio_combined = 1;
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_MULTIBOX
 	caps.has_CI = 0;
@@ -359,6 +489,11 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "Maxytec");
 	strcpy(caps.boxname, "Multibox 4K");
 	strcpy(caps.boxarch, "HI3798MV200");
+	caps.rc_has_playpause = 1;
+	strcpy(caps.display_dev, "/dev/null");
+	strcpy(caps.rc_device, "/dev/input/event0");
+	strcpy(caps.rc_device_fallback, "/dev/input/event1");
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_MULTIBOXSE
 	caps.has_CI = 0;
@@ -380,6 +515,11 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "Maxytec");
 	strcpy(caps.boxname, "Multibox SE 4K");
 	strcpy(caps.boxarch, "HI3798MV200");
+	caps.rc_has_playpause = 1;
+	strcpy(caps.display_dev, "/dev/null");
+	strcpy(caps.rc_device, "/dev/input/event0");
+	strcpy(caps.rc_device_fallback, "/dev/input/event1");
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_OSMINI4K
 	caps.has_CI = 0;
@@ -401,6 +541,7 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "Edision");
 	strcpy(caps.boxname, "OS mini 4K");
 	strcpy(caps.boxarch, "BCM72604");
+	caps.rc_has_playpause = 1;
 #endif
 #if BOXMODEL_OSMIO4K
 	caps.has_CI = 0;
@@ -422,6 +563,11 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "Edision");
 	strcpy(caps.boxname, "OS mio 4K");
 	strcpy(caps.boxarch, "BCM72604");
+	caps.rc_has_playpause = 1;
+	strcpy(caps.rc_device, "/dev/input/event0");
+	strcpy(caps.rc_device_fallback, "/dev/input/event1");
+	caps.video_std_mask |= VIDEO_STD_BIT(VIDEO_STD_1080P60);
+	caps.multiboot_devicetree = 1;
 #endif
 #if BOXMODEL_OSMIO4KPLUS
 	caps.has_CI = 0;
@@ -444,6 +590,11 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "Edision");
 	strcpy(caps.boxname, "OS mio+ 4K");
 	strcpy(caps.boxarch, "BCM72604");
+	caps.rc_has_playpause = 1;
+	strcpy(caps.rc_device, "/dev/input/event0");
+	strcpy(caps.rc_device_fallback, "/dev/input/event1");
+	caps.video_std_mask |= VIDEO_STD_BIT(VIDEO_STD_1080P60);
+	caps.multiboot_devicetree = 1;
 #endif
 
 	initialized = 1;

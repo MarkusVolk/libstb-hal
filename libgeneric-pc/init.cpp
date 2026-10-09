@@ -75,3 +75,21 @@ void hal_api_exit()
 	cMpvEngine::shutdown();
 	initialized = false;
 }
+
+void hal_display_suspend()
+{
+	if (glfb)
+		glfb->suspend();
+}
+
+void hal_display_resume()
+{
+	if (glfb)
+		glfb->resume();
+}
+
+void hal_set_terminal_fd(int fd)
+{
+	if (glfb)
+		glfb->setTerminalFd(fd);
+}

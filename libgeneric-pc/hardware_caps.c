@@ -15,6 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <hardware_caps.h>
+#include "video_std.h"
 #include <sys/utsname.h>
 
 static int initialized = 0;
@@ -37,6 +38,18 @@ hw_caps_t *get_hwcaps(void)
 	caps.display_type = HW_DISPLAY_LINE_TEXT;
 	caps.has_HDMI = 1;
 	caps.can_cec = (access("/dev/cec0", F_OK) != -1);
+	caps.video_std_mask = VIDEO_STD_BIT(VIDEO_STD_NTSC) | VIDEO_STD_BIT(VIDEO_STD_PAL) |
+		VIDEO_STD_BIT(VIDEO_STD_720P50) | VIDEO_STD_BIT(VIDEO_STD_720P60) | VIDEO_STD_BIT(VIDEO_STD_1080I50) |
+		VIDEO_STD_BIT(VIDEO_STD_1080P50) | VIDEO_STD_BIT(VIDEO_STD_1080P60);
+	caps.video_std_default = VIDEO_STD_720P50;
+	caps.osd_default_height = 720;
+	caps.can_osd_1080 = 1;
+	caps.can_ar_21_9 = 1;
+	caps.can_select_audio_output = 1;
+	caps.can_live_pause = 1;
+	strcpy(caps.rc_device, "/tmp/neutrino.input");
+	strcpy(caps.rc_device_fallback, "/tmp/neutrino.input");
+	strcpy(caps.display_dev, "/dev/null");
 	caps.display_xres = 8;
 	caps.display_can_deepstandby = 0;
 	caps.display_can_umlauts = 0; /* need test */

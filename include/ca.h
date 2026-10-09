@@ -122,6 +122,8 @@ class cCA
 		void MenuClose(enum CA_SLOT_TYPE, uint32_t Slot);
 		void SetTSClock(u32 /*Speed*/, int /*slot*/) { return; };
 		void SetCIOperator(int /*ciop*/, int /*slot = 0*/) { return; };
+		void SetCIDelay(int /*delay*/) { return; };
+		void SetCIRelevantPidsRouting(int /*rpr*/, int /*slot = 0*/) { return; };
 		bool checkChannelID(u64 /*chanID*/) { return false; };
 		void setCheckLiveSlot(int /*check*/) { return; };
 		/// start pollthread after zapit is ready

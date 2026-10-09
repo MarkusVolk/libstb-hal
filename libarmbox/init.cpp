@@ -53,3 +53,16 @@ void hal_api_exit()
 	hal_info("%s, initialized = %d\n", __FUNCTION__, (int)initialized);
 	initialized = false;
 }
+
+/* the box has no window to give away and no keyboard of its own */
+void hal_display_suspend()
+{
+}
+
+void hal_display_resume()
+{
+}
+
+void hal_set_terminal_fd(int)
+{
+}

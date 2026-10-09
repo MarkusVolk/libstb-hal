@@ -93,31 +93,15 @@ typedef enum
 	VIDEO_PLAY_MOTION_NO_SYNC
 } VIDEO_PLAY_MODE;
 
+#define HDMI_COLORIMETRY_HAS_BT470 1
 typedef enum
 {
-	VIDEO_STD_NTSC,
-	VIDEO_STD_SECAM,
-	VIDEO_STD_PAL,
-	VIDEO_STD_480P,
-	VIDEO_STD_576P,
-	VIDEO_STD_720P60,
-	VIDEO_STD_1080I60,
-	VIDEO_STD_720P50,
-	VIDEO_STD_1080I50,
-	VIDEO_STD_1080P30,
-	VIDEO_STD_1080P24,
-	VIDEO_STD_1080P25,
-	VIDEO_STD_AUTO,
-	VIDEO_STD_1080P50, /* SPARK only */
-	VIDEO_STD_1080P60,
-	VIDEO_STD_1080P2397,
-	VIDEO_STD_1080P2997,
-	VIDEO_STD_2160P24,
-	VIDEO_STD_2160P25,
-	VIDEO_STD_2160P30,
-	VIDEO_STD_2160P50,
-	VIDEO_STD_MAX
-} VIDEO_STD;
+	HDMI_COLORIMETRY_AUTO,
+	HDMI_COLORIMETRY_BT709,
+	HDMI_COLORIMETRY_BT470
+} HDMI_COLORIMETRY;
+
+#include "video_std.h"
 
 typedef enum
 {
@@ -140,6 +124,7 @@ typedef enum
 	VIDEO_CONTROL_SATURATION,
 	VIDEO_CONTROL_HUE,
 	VIDEO_CONTROL_SHARPNESS,
+	VIDEO_CONTROL_ZAPPING_MODE,
 	VIDEO_CONTROL_MAX = VIDEO_CONTROL_SHARPNESS
 } VIDEO_CONTROL;
 
@@ -221,6 +206,8 @@ class cVideo : public OpenThreads::Thread
 		void SetAudioDestination(int audio_dest);
 		void StopPicture();
 		void Standby(unsigned int bOn);
+		void ShowPig(int) {}
+		void SetHDMIColorimetry(HDMI_COLORIMETRY) {}
 		void Pig(int x, int y, int w, int h, int osd_w = 1064, int osd_h = 600, int startx = 0, int starty = 0, int endx = 1279, int endy = 719);
 		void SetControl(int, int) { return; };
 		void setContrast(int val);

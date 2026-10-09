@@ -7,6 +7,7 @@
 #include "../libmipsbox/hdmi_cec.h"
 #elif HAVE_GENERIC_HARDWARE
 #include "../libgeneric-pc/video_lib.h"
+#include "../libgeneric-pc/hdmi_cec.h"
 #else
 #error no valid hardware defined
 #endif

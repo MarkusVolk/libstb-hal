@@ -53,6 +53,8 @@ class cPlayback
 		int GetSubtitlePid(void) { return mSubtitleStream; }
 		int GetTeletextPid(void);
 		bool SetSpeed(int speed);
+		/* the player reads no further ahead than it shows */
+		int GetBufferedMs(void) { return 0; }
 		bool GetSpeed(int &speed) const;
 		bool GetPosition(int &position, int &duration, bool isWebChannel = false);
 		void GetPts(uint64_t &pts);

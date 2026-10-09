@@ -742,7 +742,7 @@ void GLFbPC::pollEvents()
 
 void GLFbPC::termWrite(uint32_t code, uint32_t unicode, uint32_t mods)
 {
-	struct glfb_term_key k = { code, unicode, mods };
+	struct hal_term_key k = { code, unicode, mods };
 	if (write(mTermFd, &k, sizeof(k)) != sizeof(k))
 		hal_info("GLFB::%s: terminal key lost: %m\n", __func__);
 }
@@ -787,16 +787,16 @@ void GLFbPC::termKey(const SDL_KeyboardEvent &key)
 {
 	uint32_t mods = 0;
 	if (key.mod & SDL_KMOD_SHIFT)
-		mods |= GLFB_MOD_SHIFT;
+		mods |= HAL_MOD_SHIFT;
 	if (key.mod & SDL_KMOD_CTRL)
-		mods |= GLFB_MOD_CTRL;
+		mods |= HAL_MOD_CTRL;
 	if (key.mod & SDL_KMOD_LALT)
-		mods |= GLFB_MOD_ALT;
+		mods |= HAL_MOD_ALT;
 	mTermSkipText = false;
 	int code = term_code(key.key);
 	if (code)
 		termWrite(code, 0, mods);
-	else if ((mods & (GLFB_MOD_CTRL | GLFB_MOD_ALT)) && key.key >= 0x20 && key.key < 0x7f)
+	else if ((mods & (HAL_MOD_CTRL | HAL_MOD_ALT)) && key.key >= 0x20 && key.key < 0x7f)
 	{
 		termWrite(0, key.key, mods);
 		mTermSkipText = true;
