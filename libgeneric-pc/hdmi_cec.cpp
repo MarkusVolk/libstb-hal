@@ -82,6 +82,7 @@ hdmi_cec::hdmi_cec()
 	volume = 0;
 	fallback = false;
 	tv_off = true;
+	configured = false;
 	deviceType = CEC_LOG_ADDR_TYPE_UNREGISTERED;
 	audio_destination = CEC_OP_PRIM_DEVTYPE_AUDIOSYSTEM;
 }
@@ -592,7 +593,7 @@ void hdmi_cec::run()
 	int epollfd = epoll_create1(0);
 	struct epoll_event event;
 	event.data.fd = hdmiFd;
-	event.events = EPOLLIN;
+	event.events = EPOLLIN | EPOLLPRI;
 
 	epoll_ctl(epollfd, EPOLL_CTL_ADD, hdmiFd, &event);
 
@@ -603,10 +604,32 @@ void hdmi_cec::run()
 		n = epoll_wait(epollfd, events.data(), EPOLL_MAX_EVENTS, EPOLL_WAIT_TIMEOUT);
 		for (int i = 0; i < n; ++i)
 		{
+			if (events[i].events & EPOLLPRI)
+				stateChanged();
 			if (events[i].events & EPOLLIN)
 				Receive(events[i].events);
 		}
 	}
+}
+
+/* The adapter has its addresses only some time after it was set up, and loses
+ * them while the television is unplugged or gives no EDID. Each time it has
+ * them again, the television is told to show this input, as after leaving
+ * standby; what was sent before went out without an address. */
+void hdmi_cec::stateChanged()
+{
+	struct cec_event ev;
+	if (!fallback || ::ioctl(hdmiFd, CEC_DQEVENT, &ev) < 0 || ev.event != CEC_EVENT_STATE_CHANGE)
+		return;
+	bool now = ev.state_change.phys_addr != CEC_PHYS_ADDR_INVALID && ev.state_change.log_addr_mask;
+	if (now == configured)
+		return;
+	configured = now;
+	hal_info(GREEN "[CEC] adapter %s, physical address %x.%x.%x.%x\n" NORMAL, now ? "configured" : "unconfigured",
+		 ev.state_change.phys_addr >> 12, (ev.state_change.phys_addr >> 8) & 0xf,
+		 (ev.state_change.phys_addr >> 4) & 0xf, ev.state_change.phys_addr & 0xf);
+	if (now && !standby)
+		SetCECState(false);
 }
 
 void hdmi_cec::Receive(int what)

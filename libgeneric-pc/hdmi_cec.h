@@ -64,6 +64,8 @@ class hdmi_cec : public OpenThreads::Thread
 		bool Start();
 		bool Stop();
 		void Receive(int what);
+		void stateChanged();
+		bool configured; /* the adapter has a physical and a logical address */
 		unsigned char physicalAddress[2];
 		bool autoview_cec_activ;
 		unsigned char deviceType, logicalAddress;
