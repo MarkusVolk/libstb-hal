@@ -129,6 +129,7 @@ class GLFbPC
 
 		void render(); /* actual render function */
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
+		void checkConnectors(); /* on KMS: reads the EDID again where it is missing */
 		void handleKey(SDL_Keycode key, SDL_Scancode scan = SDL_SCANCODE_UNKNOWN, bool repeat = false);
 		void pushKey(int code);
 		void sendKey(int code, int value);
@@ -185,6 +186,8 @@ class GLFbPC
 		/* a gamepad as remote control: what is held down repeats */
 		int mPadKey; /* the key that repeats, 0 for none */
 		uint64_t mPadNext; /* SDL ticks of its next repeat */
+		uint64_t mConnCheckNext; /* SDL ticks of the next look at the connectors */
+		bool mEdidMissing; /* what the log said last */
 		int mPadAxis[SDL_GAMEPAD_AXIS_COUNT]; /* the key each stick axis and trigger holds */
 		void padPress(int code);
 		void padRelease(int code);

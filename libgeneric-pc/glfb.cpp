@@ -200,6 +200,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mPlaneOK = false;
 	mOnPlane = false;
 	mDrmFd = -1;
+	mConnCheckNext = 0;
+	mEdidMissing = false;
 	mRenderFd = -1;
 	mSuspendReq = false;
 	mSuspended = false;
@@ -631,6 +633,51 @@ void GLFbPC::releaseGLObjects()
 }
 
 
+/* A television that is plugged in again may not give its EDID at once; the
+ * kernel then keeps the connector without one and the CEC adapter without a
+ * physical address until the owner of the display asks for the modes again,
+ * which SDL does not do. */
+void GLFbPC::checkConnectors()
+{
+	uint64_t now = SDL_GetTicks();
+	if (now < mConnCheckNext)
+		return;
+	mConnCheckNext = now + 3000;
+	const char *driver = SDL_GetCurrentVideoDriver();
+	if (!driver || strcmp(driver, "kmsdrm"))
+		return;
+	int fd = (int)SDL_GetNumberProperty(SDL_GetWindowProperties(mWindow), SDL_PROP_WINDOW_KMSDRM_DRM_FD_NUMBER, -1);
+	if (fd < 0)
+		return;
+	drmModeRes *res = drmModeGetResources(fd);
+	bool missing = false;
+	for (int i = 0; res && i < res->count_connectors; i++)
+	{
+		drmModeConnector *c = drmModeGetConnectorCurrent(fd, res->connectors[i]);
+		if (!c)
+			continue;
+		bool edid = false;
+		for (int p = 0; c->connection == DRM_MODE_CONNECTED && p < c->count_props && !edid; p++)
+		{
+			drmModePropertyRes *prop = drmModeGetProperty(fd, c->props[p]);
+			edid = prop && !strcmp(prop->name, "EDID") && c->prop_values[p];
+			drmModeFreeProperty(prop);
+		}
+		if (c->connection == DRM_MODE_CONNECTED && !edid)
+		{
+			/* asking with the modes reads the EDID again */
+			drmModeConnector *probed = drmModeGetConnector(fd, c->connector_id);
+			drmModeFreeConnector(probed);
+			missing = true;
+		}
+		drmModeFreeConnector(c);
+	}
+	drmModeFreeResources(res);
+	if (missing != mEdidMissing)
+		hal_info("GLFB::%s: %s\n", __func__, missing ? "a connected display gives no EDID, asking again" : "the EDID is back");
+	mEdidMissing = missing;
+}
+
 void GLFbPC::pollEvents()
 {
 	SDL_Event ev;
@@ -658,6 +705,7 @@ void GLFbPC::pollEvents()
 	}
 	bool got = SDL_WaitEventTimeout(&ev, timeout);
 	padRepeat();
+	checkConnectors();
 	if (!got)
 		return;
 	do
