@@ -66,3 +66,7 @@ void hal_display_resume()
 void hal_set_terminal_fd(int)
 {
 }
+
+void hal_set_video_system(int)
+{
+}

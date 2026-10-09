@@ -129,6 +129,11 @@ void GLFbPC::setHidden(bool hidden)
 void GLFbPC::setDisplayMode(int w, int h, float rate)
 {
 	mReInitLock.lock();
+	if (w == mWantW && h == mWantH && rate == mWantRate)
+	{
+		mReInitLock.unlock();
+		return;
+	}
 	mWantW = w;
 	mWantH = h;
 	mWantRate = rate;

@@ -299,70 +299,86 @@ int cVideo::GetVideoSystem()
 	return current_video_system;
 }
 
-int cVideo::SetVideoSystem(int system, bool)
+/* the display mode of a VIDEO_STD */
+static bool video_std_mode(int system, int *w, int *h, float *rate)
 {
-	int w, h;
-	float rate;
 	switch (system)
 	{
 		case VIDEO_STD_NTSC:
 		case VIDEO_STD_480P:
-			w = 720; h = 480; rate = 60;
+			*w = 720; *h = 480; *rate = 60;
 			break;
 		case VIDEO_STD_SECAM:
 		case VIDEO_STD_PAL:
 		case VIDEO_STD_576P:
-			w = 720; h = 576; rate = 50;
+			*w = 720; *h = 576; *rate = 50;
 			break;
 		case VIDEO_STD_720P50:
-			w = 1280; h = 720; rate = 50;
+			*w = 1280; *h = 720; *rate = 50;
 			break;
 		case VIDEO_STD_720P60:
-			w = 1280; h = 720; rate = 60;
+			*w = 1280; *h = 720; *rate = 60;
 			break;
 		/* there is no interlaced output here, 1080i is 1080p at the same rate */
 		case VIDEO_STD_1080I50:
 		case VIDEO_STD_1080P50:
-			w = 1920; h = 1080; rate = 50;
+			*w = 1920; *h = 1080; *rate = 50;
 			break;
 		case VIDEO_STD_1080I60:
 		case VIDEO_STD_1080P60:
-			w = 1920; h = 1080; rate = 60;
+			*w = 1920; *h = 1080; *rate = 60;
 			break;
 		case VIDEO_STD_1080P24:
-			w = 1920; h = 1080; rate = 24;
+			*w = 1920; *h = 1080; *rate = 24;
 			break;
 		case VIDEO_STD_1080P2397:
-			w = 1920; h = 1080; rate = 23.976;
+			*w = 1920; *h = 1080; *rate = 23.976;
 			break;
 		case VIDEO_STD_1080P25:
-			w = 1920; h = 1080; rate = 25;
+			*w = 1920; *h = 1080; *rate = 25;
 			break;
 		case VIDEO_STD_1080P30:
-			w = 1920; h = 1080; rate = 30;
+			*w = 1920; *h = 1080; *rate = 30;
 			break;
 		case VIDEO_STD_1080P2997:
-			w = 1920; h = 1080; rate = 29.97;
+			*w = 1920; *h = 1080; *rate = 29.97;
 			break;
 		case VIDEO_STD_2160P24:
-			w = 3840; h = 2160; rate = 24;
+			*w = 3840; *h = 2160; *rate = 24;
 			break;
 		case VIDEO_STD_2160P25:
-			w = 3840; h = 2160; rate = 25;
+			*w = 3840; *h = 2160; *rate = 25;
 			break;
 		case VIDEO_STD_2160P30:
-			w = 3840; h = 2160; rate = 30;
+			*w = 3840; *h = 2160; *rate = 30;
 			break;
 		case VIDEO_STD_2160P50:
-			w = 3840; h = 2160; rate = 50;
+			*w = 3840; *h = 2160; *rate = 50;
 			break;
 		case VIDEO_STD_AUTO:
-			hal_info("%s: VIDEO_STD_AUTO not implemented\n", __func__);
-			return 0;
+			hal_info_c("%s: VIDEO_STD_AUTO not implemented\n", __func__);
+			return false;
 		default:
-			hal_info("%s: unhandled value %d\n", __func__, system);
-			return 0;
+			hal_info_c("%s: unhandled value %d\n", __func__, system);
+			return false;
 	}
+	return true;
+}
+
+void hal_set_video_system(int system)
+{
+	int w, h;
+	float rate;
+	if (glfb_priv && video_std_mode(system, &w, &h, &rate))
+		glfb_priv->setDisplayMode(w, h, rate);
+}
+
+int cVideo::SetVideoSystem(int system, bool)
+{
+	int w, h;
+	float rate;
+	if (!video_std_mode(system, &w, &h, &rate))
+		return 0;
 	hal_info("%s: %d -> %dx%d at %.2f Hz\n", __func__, system, w, h, rate);
 	v_std = (VIDEO_STD) system;
 	v_std_set = true;

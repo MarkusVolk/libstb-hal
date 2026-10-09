@@ -26,4 +26,9 @@ struct hal_term_key
  * instead of sending remote control keys; nothing happens without a window */
 void hal_set_terminal_fd(int fd);
 
+/* the display takes the mode of this VIDEO_STD right away, before the program
+ * draws anything, so the screen does not switch modes once more when the
+ * video system is set; nothing happens where the HAL owns no display */
+void hal_set_video_system(int system);
+
 #endif // __INIT_H__
