@@ -9,7 +9,7 @@ AM_CFLAGS = -Wall
 
 AM_CXXFLAGS = -fno-rtti -fno-exceptions -fno-strict-aliasing
 
-AM_LDFLAGS = -lpthread
+libcommon_la_LIBADD = -lpthread
 
 if BOXTYPE_ARMBOX
 AM_CXXFLAGS += \

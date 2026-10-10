@@ -5,7 +5,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/include
 
 AM_CXXFLAGS = -fno-rtti -fno-exceptions -fno-strict-aliasing
-AM_LDFLAGS = -lpthread -lcrypto -lssl
+libdvbci_la_LIBADD = -lpthread -lcrypto -lssl
 
 libdvbci_la_SOURCES = \
 	dvbci_session.cpp \

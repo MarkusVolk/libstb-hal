@@ -37,13 +37,14 @@ AC_DISABLE_STATIC
 AC_SYS_LARGEFILE
 LT_INIT
 
+PKG_CHECK_MODULES([AVFORMAT], [libavformat >= 53.21.1])
+PKG_CHECK_MODULES([AVCODEC], [libavcodec >= 54.28.0])
+# don't know which version is exactly needed here...
+PKG_CHECK_MODULES([AVUTIL], [libavutil])
+PKG_CHECK_MODULES([SWSCALE], [libswscale])
+PKG_CHECK_MODULES([SWRESAMPLE], [libswresample])
+
 if test x$BOXTYPE = xgeneric; then
-	PKG_CHECK_MODULES([AVFORMAT], [libavformat >= 53.21.1])
-	PKG_CHECK_MODULES([AVCODEC], [libavcodec >= 54.28.0])
-	# don't know which version is exactly needed here...
-	PKG_CHECK_MODULES([AVUTIL], [libavutil])
-	PKG_CHECK_MODULES([SWSCALE], [libswscale])
-	PKG_CHECK_MODULES([SWRESAMPLE], [libswresample])
 	PKG_CHECK_MODULES([SDL3], [sdl3 >= 3.2.0])
 	PKG_CHECK_MODULES([GLES2], [glesv2])
 	PKG_CHECK_MODULES([MPV], [mpv >= 1.108])

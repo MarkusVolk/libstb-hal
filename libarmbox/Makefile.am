@@ -19,13 +19,14 @@ AM_CPPFLAGS += \
 
 AM_CXXFLAGS = -fno-rtti -fno-exceptions -fno-strict-aliasing
 
-AM_LDFLAGS = \
+libarmbox_la_LIBADD = \
 	-lOpenThreads \
 	@AVFORMAT_LIBS@ \
 	@AVUTIL_LIBS@ \
 	@AVCODEC_LIBS@ \
 	@SWRESAMPLE_LIBS@ \
-	-lpthread -lass -lrt
+	@SWSCALE_LIBS@ \
+	-lpthread -lrt
 
 libarmbox_la_SOURCES = \
 	hardware_caps.c \
