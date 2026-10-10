@@ -13,7 +13,7 @@ AM_CPPFLAGS += \
 
 AM_CXXFLAGS = -fno-rtti -fno-exceptions -fno-strict-aliasing
 
-AM_LDFLAGS = \
+libgeneric_la_LIBADD = \
 	-lrt \
 	-lOpenThreads \
 	@AVFORMAT_LIBS@ \
