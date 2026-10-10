@@ -1,5 +1,16 @@
 noinst_LTLIBRARIES = libarmbox.la
 
+libarmboxincludedir = $(includedir)/libarmbox
+libarmboxinclude_HEADERS = \
+	audio_lib.h \
+	hdmi_cec.h \
+	hdmi_cec_types.h \
+	linux-uapi-cec.h \
+	playback_libeplayer3.h \
+	record_lib.h \
+	video_lib.h \
+	video_std.h
+
 AM_CPPFLAGS = -D__STDC_FORMAT_MACROS -D__STDC_CONSTANT_MACROS -D_FILE_OFFSET_BITS=64
 AM_CPPFLAGS += \
 	-I$(top_srcdir)/common \

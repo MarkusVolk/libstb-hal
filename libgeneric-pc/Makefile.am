@@ -1,5 +1,19 @@
 noinst_LTLIBRARIES = libgeneric.la
 
+libgenericpcincludedir = $(includedir)/libgeneric-pc
+libgenericpcinclude_HEADERS = \
+	audio_lib.h \
+	dmx_file.h \
+	glfb_priv.h \
+	hdmi_cec.h \
+	hdmi_cec_types.h \
+	linux-uapi-cec.h \
+	mpv_player.h \
+	playback_lib.h \
+	record_lib.h \
+	video_lib.h \
+	video_std.h
+
 AM_CPPFLAGS = -D__STDC_FORMAT_MACROS -D__STDC_CONSTANT_MACROS
 AM_CPPFLAGS += -Wfatal-errors
 AM_CPPFLAGS += \

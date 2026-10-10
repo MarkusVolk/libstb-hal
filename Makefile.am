@@ -7,6 +7,29 @@ SUBDIRS = common tools
 libstb_hal_la_LIBADD = \
 	common/libcommon.la
 
+libstbhalincludedir = $(includedir)/libstb-hal
+libstbhalinclude_HEADERS = \
+	include/audio_hal.h \
+	include/ca.h \
+	include/ca_ci.h \
+	include/ca_hal.h \
+	include/cs_api.h \
+	include/cs_frontpanel.h \
+	include/cs_types.h \
+	include/dmx_hal.h \
+	include/glfb.h \
+	include/hal_debug.h \
+	include/hardware_caps.h \
+	include/init.h \
+	include/mmi.h \
+	include/playback_hal.h \
+	include/pwrmngr.h \
+	include/record_hal.h \
+	include/streaminput.h \
+	include/streaminput_ffmpeg.h \
+	include/version_hal.h \
+	include/video_hal.h
+
 #bin_PROGRAMS = libstb-hal-test
 #libstb_hal_test_SOURCES = libtest.cpp
 #libstb_hal_test_LDADD = libstb-hal.la
