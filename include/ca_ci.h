@@ -345,6 +345,9 @@ class cCA
 		void SetCIDelay(int Delay);
 		/// relevant pids routing
 		void SetCIRelevantPidsRouting(int RPR, int slot = 0);
+#else
+		void SetCIDelay(int /*Delay*/) { return; };
+		void SetCIRelevantPidsRouting(int /*RPR*/, int /*slot*/ = 0) { return; };
 #endif
 		/// ci operator mode
 		int op[4];
