@@ -65,6 +65,7 @@ typedef struct hw_caps
 	int can_zapping_mode;
 	int can_hdmi_colorimetry;
 	int can_ar_21_9;
+	int can_ar_16_10;
 	int can_select_audio_output; /* HDMI, S/PDIF, analog, USB, Bluetooth */
 	int can_live_pause; /* live TV can be held in a buffer */
 	int video_needs_blank_frame; /* stopFrame() leaves a picture, a black frame is drawn */

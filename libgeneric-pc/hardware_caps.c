@@ -45,6 +45,7 @@ hw_caps_t *get_hwcaps(void)
 	caps.osd_default_height = 720;
 	caps.can_osd_1080 = 1;
 	caps.can_ar_21_9 = 1;
+	caps.can_ar_16_10 = 1;
 	caps.can_select_audio_output = 1;
 	caps.can_live_pause = 1;
 	strcpy(caps.rc_device, "/tmp/neutrino.input");

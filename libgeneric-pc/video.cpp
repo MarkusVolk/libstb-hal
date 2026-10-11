@@ -85,7 +85,7 @@ static void get_packet_defaults(AVPacket *pkt)
 }
 #endif
 
-static const AVRational aspect_ratios[7] =
+static const AVRational aspect_ratios[8] =
 {
 	{  1, 1 },
 	{  4, 3 },
@@ -93,6 +93,7 @@ static const AVRational aspect_ratios[7] =
 	{ 16, 9 },
 	{ 20, 9 },
 	{ 21, 9 },
+	{ 16, 10 },
 	{ -1, -1 }
 };
 
@@ -164,7 +165,7 @@ int cVideo::setAspectRatio(int vformat, int cropping)
 		display_crop = (DISPLAY_AR_MODE) cropping;
 	if (display_aspect < DISPLAY_AR_RAW && output_h > 0) /* don't know what to do with this */
 		glfb_priv->setOutputFormat(aspect_ratios[display_aspect], output_h, display_crop,
-					   display_aspect == DISPLAY_AR_21_9);
+					   display_aspect == DISPLAY_AR_21_9 || display_aspect == DISPLAY_AR_16_10);
 	return 0;
 }
 
@@ -387,7 +388,7 @@ int cVideo::SetVideoSystem(int system, bool)
 	glfb_priv->setDisplayMode(w, h, rate);
 	if (display_aspect < DISPLAY_AR_RAW && output_h > 0) /* don't know what to do with this */
 		glfb_priv->setOutputFormat(aspect_ratios[display_aspect], output_h, display_crop,
-					   display_aspect == DISPLAY_AR_21_9);
+					   display_aspect == DISPLAY_AR_21_9 || display_aspect == DISPLAY_AR_16_10);
 	return 0;
 }
 
