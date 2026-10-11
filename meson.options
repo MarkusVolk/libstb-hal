@@ -1,0 +1,2 @@
+option('boxtype', type : 'combo', choices : ['generic', 'armbox', 'mipsbox'], value : 'generic',
+	description : 'Hardware the library is built for')

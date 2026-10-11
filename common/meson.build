@@ -1,0 +1,11 @@
+libcommon = static_library('common',
+	'ca.cpp',
+	'hal_debug.cpp',
+	'proc_tools.c',
+	'pwrmngr.cpp',
+	'streaminput.c',
+	'version_hal.cpp',
+	include_directories : [config_inc, hal_inc],
+	dependencies : threads_dep,
+	pic : true,
+)
