@@ -28,6 +28,8 @@
 
 #include <mpv/client.h>
 extern "C" {
+/* MKTAG for the AVERROR_ macros: ffmpeg 4.4's error.h does not bring it */
+#include <libavutil/common.h>
 #include <libavutil/error.h>
 }
 
