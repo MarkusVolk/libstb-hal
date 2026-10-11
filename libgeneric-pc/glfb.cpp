@@ -53,6 +53,13 @@
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_INIT, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_INIT, this, args)
 
+/* mpv 0.35 renamed the interop that puts DRM PRIME frames on a plane */
+#if MPV_CLIENT_API_VERSION >= MPV_MAKE_VERSION(2, 0)
+#define DRMPRIME_OVERLAY_INTEROP "drmprime-overlay"
+#else
+#define DRMPRIME_OVERLAY_INTEROP "drmprime-drm"
+#endif
+
 
 extern cVideo *videoDecoder;
 extern cAudio *audioDecoder;
@@ -1627,7 +1634,7 @@ bool GLFbPC::setupPlane(void *params)
 
 	cMpvEngine *engine = cMpvEngine::getInstance();
 	/* only the overlay interop: the frames are never drawn by the GPU */
-	engine->setString("gpu-hwdec-interop", "drmprime-overlay");
+	engine->setString("gpu-hwdec-interop", DRMPRIME_OVERLAY_INTEROP);
 	engine->setString("drm-drmprime-video-plane", "primary");
 	engine->setString("drm-draw-plane", "overlay");
 
