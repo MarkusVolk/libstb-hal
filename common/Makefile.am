@@ -5,7 +5,7 @@ noinst_LTLIBRARIES = libcommon.la
 AM_CPPFLAGS = \
 	-I $(top_srcdir)/include
 
-AM_CFLAGS = -Wall
+AM_CFLAGS = -Wall -fno-strict-aliasing
 
 AM_CXXFLAGS = -fno-rtti -fno-exceptions -fno-strict-aliasing
 

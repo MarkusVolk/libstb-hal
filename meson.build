@@ -42,7 +42,7 @@ conf.set_quoted('PACKAGE_VERSION_GIT', git_version)
 configure_file(output : 'config.h', configuration : conf)
 configure_file(output : 'libstb-hal-config.h', configuration : conf)
 
-add_project_arguments('-fno-strict-aliasing', language : 'cpp')
+add_project_arguments('-fno-strict-aliasing', language : ['c', 'cpp'])
 
 config_inc = include_directories('.')
 hal_inc = include_directories('include')
