@@ -116,21 +116,25 @@ static int32_t UpdateExtraData(uint8_t **ppExtraData, uint32_t *pExtraDataSize, 
 	while (d + 4 < pData + dataSize)
 	{
 		uint32_t nalLen = ReadUint32(d);
+		if (nalLen > (uint32_t)(pData + dataSize - d - 4))
+		{
+			h264_err("NAL length exceeds extradata...\n");
+			return -1;
+		}
 
 		uint8_t nalType = d[4] & 0x1f;
 		if (nalType == 7)
 		{
 			/* SPS */
 
-			// 16 bits size
-			sps[spsIdx++] = (uint8_t)(0xFF & (nalLen >> 8));
-			sps[spsIdx++] = (uint8_t)(0xFF & nalLen);
-
-			if (spsIdx + nalLen >= sizeof(sps))
+			if ((size_t)spsIdx + 2 + nalLen >= sizeof(sps))
 			{
 				h264_err("SPS no free space to copy...\n");
 				return -1;
 			}
+			// 16 bits size
+			sps[spsIdx++] = (uint8_t)(0xFF & (nalLen >> 8));
+			sps[spsIdx++] = (uint8_t)(0xFF & nalLen);
 			memcpy(&(sps[spsIdx]), d + 4, nalLen);
 			spsIdx += nalLen;
 
@@ -142,15 +146,14 @@ static int32_t UpdateExtraData(uint8_t **ppExtraData, uint32_t *pExtraDataSize, 
 		{
 			/* PPS */
 
-			// 16 bits size
-			pps[ppsIdx++] = (uint8_t)(0xFF & (nalLen >> 8));
-			pps[ppsIdx++] = (uint8_t)(0xFF & nalLen);
-
-			if (ppsIdx + nalLen >= sizeof(sps))
+			if ((size_t)ppsIdx + 2 + nalLen >= sizeof(pps))
 			{
 				h264_err("PPS not free space to copy...\n");
 				return -1;
 			}
+			// 16 bits size
+			pps[ppsIdx++] = (uint8_t)(0xFF & (nalLen >> 8));
+			pps[ppsIdx++] = (uint8_t)(0xFF & nalLen);
 			memcpy(&(pps[ppsIdx]), d + 4, nalLen);
 			ppsIdx += nalLen;
 
@@ -161,8 +164,15 @@ static int32_t UpdateExtraData(uint8_t **ppExtraData, uint32_t *pExtraDataSize, 
 		d += 4 + nalLen;
 	}
 	uint32_t idx = 0;
-	*ppExtraData = malloc(7 + spsIdx + ppsIdx);
-	aExtraData = *ppExtraData;
+	if (numSps == 0)
+	{
+		h264_err("no SPS found...\n");
+		return -1;
+	}
+	aExtraData = malloc(7 + spsIdx + ppsIdx);
+	if (!aExtraData)
+		return -1;
+	*ppExtraData = aExtraData;
 	aExtraData[idx++] = 0x1;            // version
 	aExtraData[idx++] = sps[3];         // profile
 	aExtraData[idx++] = sps[4];         // profile compat
@@ -212,6 +222,11 @@ static int32_t PreparCodecData(unsigned char *data, unsigned int cd_len, unsigne
 				if (*profile_str) {}
 				memcpy(tmp, Head, sizeof(Head));
 				tmp_len += 4;
+				if (tmp_len + len >= sizeof(tmp))
+				{
+					h264_err("SPS too big for codec data buffer (%u)\n", len);
+					return -5;
+				}
 				memcpy(tmp + tmp_len, data + 8, len);
 				for (i = 0; i < 4; ++i)
 				{
@@ -239,12 +254,19 @@ static int32_t PreparCodecData(unsigned char *data, unsigned int cd_len, unsigne
 					cd_pos += 3;
 					if (cd_len >= (cd_pos + len))
 					{
+						if (tmp_len + 4 + len >= sizeof(tmp))
+						{
+							h264_err("PPS too big for codec data buffer (%u)\n", len);
+							return -5;
+						}
 						memcpy(tmp + tmp_len, "\x00\x00\x00\x01", 4);
 						tmp_len += 4;
 						memcpy(tmp + tmp_len, data + cd_pos, len);
 						tmp_len += len;
 
 						CodecData = malloc(tmp_len);
+						if (!CodecData)
+							return -6;
 						memcpy(CodecData, tmp, tmp_len);
 						CodecDataLen = tmp_len;
 

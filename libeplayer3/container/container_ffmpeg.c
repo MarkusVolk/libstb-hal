@@ -1095,6 +1095,7 @@ static void FFMPEGThread(Context_t *context)
 	threadname[16] = 0;
 	prctl(PR_SET_NAME, (unsigned long)&threadname);
 	AVPacket packet;
+	memset(&packet, 0, sizeof(packet)); /* unref'd below even when no frame was read */
 
 	int64_t currentVideoPts = -1;
 	int64_t currentAudioPts = -1;
@@ -3125,10 +3126,17 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
 							const char marker[] = "LATM";
 							track.aacbuflen = sizeof(marker) / sizeof(char);
 							track.aacbuf = malloc(track.aacbuflen);
-							memcpy(track.aacbuf, marker, track.aacbuflen);
+							if (track.aacbuf == NULL)
+							{
+								track.aacbuflen = 0;
+							}
+							else
+							{
+								memcpy(track.aacbuf, marker, track.aacbuflen);
 
-							ffmpeg_printf(10, "AV_CODEC_ID_AAC_LATM no extradata ACC header should be available in each frame\n");
-							track.have_aacheader = 1;
+								ffmpeg_printf(10, "AV_CODEC_ID_AAC_LATM no extradata ACC header should be available in each frame\n");
+								track.have_aacheader = 1;
+							}
 						}
 						else if (!strncmp(encoding, "A_AAC_LATM", 10))
 						{
@@ -3218,8 +3226,15 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
 								 */
 								track.aacbuflen = sizeof(ADTS_MARKER);
 								track.aacbuf = malloc(track.aacbuflen);
-								memcpy(track.aacbuf, ADTS_MARKER, track.aacbuflen);
-								track.have_aacheader = 1;
+								if (track.aacbuf == NULL)
+								{
+									track.aacbuflen = 0;
+								}
+								else
+								{
+									memcpy(track.aacbuf, ADTS_MARKER, track.aacbuflen);
+									track.have_aacheader = 1;
+								}
 								if (aac_debug_enabled())
 								{
 									ffmpeg_printf(1, "AAC track fallback to inline ADTS ctx=%d stream=%d sample_index=%d chan_config=%d off=%d\n",
@@ -3235,16 +3250,18 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
 								if (off >= 0 && chan_config == 0)   // channel config must be send in the inband PCE
 								{
 									track.aacbuf = malloc(AAC_HEADER_LENGTH + MAX_PCE_SIZE);
+									if (track.aacbuf != NULL)
+									{
+										GetBitContext gb;
+										PutBitContext pb;
+										init_put_bits(&pb, track.aacbuf + AAC_HEADER_LENGTH, MAX_PCE_SIZE);
+										init_get_bits8(&gb, get_codecpar(stream)->extradata, get_codecpar(stream)->extradata_size);
+										skip_bits_long(&gb, off + 3);
 
-									GetBitContext gb;
-									PutBitContext pb;
-									init_put_bits(&pb, track.aacbuf + AAC_HEADER_LENGTH, MAX_PCE_SIZE);
-									init_get_bits8(&gb, get_codecpar(stream)->extradata, get_codecpar(stream)->extradata_size);
-									skip_bits_long(&gb, off + 3);
-
-									put_bits(&pb, 3, 5); //ID_PCE
-									track.aacbuflen = AAC_HEADER_LENGTH + (avpriv_copy_pce_data(&pb, &gb) + 3) / 8;
-									flush_put_bits(&pb);
+										put_bits(&pb, 3, 5); //ID_PCE
+										track.aacbuflen = AAC_HEADER_LENGTH + (avpriv_copy_pce_data(&pb, &gb) + 3) / 8;
+										flush_put_bits(&pb);
+									}
 								}
 								else
 								{
@@ -3252,22 +3269,29 @@ int32_t container_ffmpeg_update_tracks(Context_t *context, char *filename, int32
 									track.aacbuf = malloc(AAC_HEADER_LENGTH + 1);
 								}
 
-								// https://wiki.multimedia.cx/index.php/ADTS
-								object_type -= 1; //ADTS - profile, the MPEG-4 Audio Object Type minus 1
+								if (track.aacbuf == NULL)
+								{
+									track.aacbuflen = 0;
+								}
+								else
+								{
+									// https://wiki.multimedia.cx/index.php/ADTS
+									object_type -= 1; //ADTS - profile, the MPEG-4 Audio Object Type minus 1
 
-								track.aacbuf[0] = 0xFF;
-								track.aacbuf[1] = 0xF1;
-								//track.aacbuf[1] |=0x8;
-								track.aacbuf[2] = ((object_type & 0x03) << 6)  | (sample_index << 2) | ((chan_config >> 2) & 0x01);
-								track.aacbuf[3] = (chan_config & 0x03) << 6;
-								//track.aacbuf[3]|= 0x10;
-								track.aacbuf[4] = 0x00;
-								track.aacbuf[5] = 0x1F;
-								track.aacbuf[6] = 0xFC;
+									track.aacbuf[0] = 0xFF;
+									track.aacbuf[1] = 0xF1;
+									//track.aacbuf[1] |=0x8;
+									track.aacbuf[2] = ((object_type & 0x03) << 6)  | (sample_index << 2) | ((chan_config >> 2) & 0x01);
+									track.aacbuf[3] = (chan_config & 0x03) << 6;
+									//track.aacbuf[3]|= 0x10;
+									track.aacbuf[4] = 0x00;
+									track.aacbuf[5] = 0x1F;
+									track.aacbuf[6] = 0xFC;
 
-								//printf("AAC_HEADER -> ");
-								//Hexdump(track.aacbuf,7);
-								track.have_aacheader = 1;
+									//printf("AAC_HEADER -> ");
+									//Hexdump(track.aacbuf,7);
+									track.have_aacheader = 1;
+								}
 							}
 						}
 #ifdef __sh__

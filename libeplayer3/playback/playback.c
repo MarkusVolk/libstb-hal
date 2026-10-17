@@ -43,7 +43,7 @@
 /* ***************************** */
 
 static pthread_t supervisorThread;
-static int hasThreadStarted = 0;
+static volatile int hasThreadStarted = 0; /* shared with the detached supervisor thread */
 
 /* ***************************** */
 /* Prototypes                    */
@@ -450,7 +450,7 @@ static int32_t PlaybackStop(Context_t *context)
 		ret = cERR_PLAYBACK_ERROR;
 	}
 
-	while ((hasThreadStarted == 1) && (--wait_time) > 0)
+	while ((hasThreadStarted != 0) && (--wait_time) > 0)
 	{
 		playback_printf(10, "Waiting for supervisor thread to terminate itself, will try another %d times\n", wait_time);
 		usleep(100000);
