@@ -313,11 +313,11 @@ int cAudio::PrepareClipPlay(int ch, int srate, int bits, int little_endian)
 		return -1;
 	}
 	fcntl(clipfd, F_SETFD, FD_CLOEXEC);
-	/* no idea if we ever get little_endian == 0 */
+	/* the flag describes the sample data: little-endian PCM wants AFMT_S16_LE */
 	if (little_endian)
-		fmt = AFMT_S16_BE;
-	else
 		fmt = AFMT_S16_LE;
+	else
+		fmt = AFMT_S16_BE;
 	if (ioctl(clipfd, SNDCTL_DSP_SETFMT, &fmt))
 		perror("SNDCTL_DSP_SETFMT");
 	if (ioctl(clipfd, SNDCTL_DSP_CHANNELS, &ch))
