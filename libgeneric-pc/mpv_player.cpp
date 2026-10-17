@@ -371,7 +371,7 @@ cMpvEngine::cMpvEngine()
 	: mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
 	  mEof(false), mIdle(true), mLastError(0), mOwner(OWNER_NONE), mLiveSerial(0),
 	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveTarget(0.5), mLivePaused(false), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
-	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0)
+	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0), mTracksValid(false), mTracksGen(0)
 {
 	mStatsTime = 0;
 	mVideo.valid = false;
@@ -428,6 +428,7 @@ cMpvEngine::cMpvEngine()
 	mpv_observe_property(h, 5, "time-pos", MPV_FORMAT_DOUBLE);
 	mpv_observe_property(h, 6, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
 	mpv_observe_property(h, 7, "video-dec-params/aspect", MPV_FORMAT_DOUBLE);
+	mpv_observe_property(h, 8, "track-list", MPV_FORMAT_NONE);
 	r = mpv_stream_cb_add_ro(h, LIVE_PROTOCOL, this, live_open);
 	if (r < 0)
 		hal_info("%s: no live TV, mpv_stream_cb_add_ro: %s\n", __func__, mpv_error_string(r));
@@ -466,6 +467,7 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 	switch (ev->event_id)
 	{
 		case MPV_EVENT_START_FILE:
+			tracksChanged();
 			mRenderLock.lock();
 			mStartedEntry = ((mpv_event_start_file *)ev->data)->playlist_entry_id;
 			mRenderLock.unlock();
@@ -530,6 +532,8 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 			}
 			else if (ev->reply_userdata == 6 && p->format == MPV_FORMAT_DOUBLE)
 				liveClock(*(double *)p->data);
+			else if (ev->reply_userdata == 8)
+				tracksChanged();
 			else if (ev->reply_userdata == 7)
 			{
 				mVideoLock.lock();
@@ -864,6 +868,7 @@ void cMpvEngine::renderEnd()
 /* "loadfile <url> replace", with the frames of what is replaced locked out */
 bool cMpvEngine::loadFile(const char *url, const char *options)
 {
+	tracksChanged();
 	renderBlock();
 	const char *cmd[] = { "loadfile", url, "replace", options ? "-1" : NULL, options, NULL };
 	mpv_node res;
@@ -939,6 +944,7 @@ bool cMpvEngine::setFlag(const char *name, bool v)
 
 bool cMpvEngine::setInt(const char *name, int64_t v)
 {
+	tracksChanged(); /* aid, sid, edition */
 	return mpv_set_property(mpv, name, MPV_FORMAT_INT64, &v) >= 0;
 }
 
@@ -974,6 +980,7 @@ void cMpvEngine::setVideoMargins(double left, double top, double right, double b
 
 bool cMpvEngine::setString(const char *name, const std::string &v)
 {
+	tracksChanged();
 	return mpv_set_property_string(mpv, name, v.c_str()) >= 0;
 }
 
@@ -1008,14 +1015,32 @@ bool cMpvEngine::getString(const char *name, std::string &v)
 
 bool cMpvEngine::command(const char *const *args)
 {
+	tracksChanged();
 	int r = mpv_command(mpv, const_cast<const char **>(args));
 	if (r < 0)
 		hal_info("%s: %s: %s\n", __func__, args[0], mpv_error_string(r));
 	return r >= 0;
 }
 
+void cMpvEngine::tracksChanged()
+{
+	OpenThreads::ScopedLock<OpenThreads::Mutex> l(mTracksLock);
+	mTracksValid = false;
+	mTracksGen++;
+}
+
 bool cMpvEngine::getTracks(std::vector<Track> &tracks)
 {
+	mTracksLock.lock();
+	if (mTracksValid)
+	{
+		tracks = mTracks;
+		mTracksLock.unlock();
+		return true;
+	}
+	const unsigned gen = mTracksGen;
+	mTracksLock.unlock();
+
 	tracks.clear();
 	mpv_node node;
 	if (mpv_get_property(mpv, "track-list", MPV_FORMAT_NODE, &node) < 0)
@@ -1038,6 +1063,14 @@ bool cMpvEngine::getTracks(std::vector<Track> &tracks)
 		}
 	}
 	mpv_free_node_contents(&node);
+	/* keep it unless something changed while it was read */
+	mTracksLock.lock();
+	if (gen == mTracksGen)
+	{
+		mTracks = tracks;
+		mTracksValid = true;
+	}
+	mTracksLock.unlock();
 	return true;
 }
 

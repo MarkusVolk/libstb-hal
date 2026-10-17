@@ -39,6 +39,7 @@
 #include <unistd.h>
 #include <linux/input.h>
 #include <climits>
+#include <algorithm>
 #include <mpv/render_gl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -229,6 +230,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mOsdW = x;
 	mOsdH = y;
 	mOsdResize = false;
+	mOsdFull = true;
 	mWantW = mWantH = 0;
 	mWantRate = 0;
 	mModeChange = false;
@@ -633,6 +635,7 @@ bool GLFbPC::setupGLObjects()
 	glGenTextures(1, &mState.displaytex);
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mState.width, mState.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+	mOsdFull = true;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1119,6 +1122,8 @@ void GLFbPC::render()
 	static uint64_t stat_since, stat_video, stat_draw, stat_swap, stat_max;
 	static int stat_frames;
 	uint64_t t_start = SDL_GetTicksNS();
+	/* NULL after shutdown(); fetched once, the helpers below get it passed */
+	cMpvEngine *engine = cMpvEngine::getInstance();
 
 	mReInitLock.lock();
 	if (mModeChange)
@@ -1127,7 +1132,16 @@ void GLFbPC::render()
 		/* a desktop keeps its mode, the window is scaled there */
 		const char *driver = SDL_GetCurrentVideoDriver();
 		if (mFullscreen && driver && !strcmp(driver, "kmsdrm"))
-			applyDisplayMode(mWantW, mWantH, mWantRate, "the video system");
+		{
+			/* the switch waits for the display; the callers of setDisplayMode()
+			 * and friends need not wait with it. mWant* are only read under the
+			 * lock, a request that comes in meanwhile sets mModeChange again */
+			const int w = mWantW, h = mWantH;
+			const float rate = mWantRate;
+			mReInitLock.unlock();
+			applyDisplayMode(w, h, rate, "the video system");
+			mReInitLock.lock();
+		}
 	}
 	if (mOsdResize)
 	{
@@ -1137,6 +1151,7 @@ void GLFbPC::render()
 		glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mOsdW, mOsdH, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
 		memset(mOsdBox, 0, sizeof(mOsdBox));
+		mOsdFull = true;
 		mState.blit = true;
 	}
 	const bool reinit = mReInit;
@@ -1187,9 +1202,8 @@ void GLFbPC::render()
 		hal_info("%s: reinit mX:%d mY:%d xoff:%d yoff:%d fs %d\n", __func__, *mX, *mY, xoff, yoff, mFullscreen);
 		/* mpv picks the frames to show by the display's rate; without it,
 		 * a 50 Hz programme on a 25 Hz display loses more than every other one */
-		cMpvEngine *e = cMpvEngine::getInstance();
-		if (e && mode && mode->refresh_rate > 0)
-			e->setDisplayFps(mode->refresh_rate);
+		if (engine && mode && mode->refresh_rate > 0)
+			engine->setDisplayFps(mode->refresh_rate);
 		mViewX = xoff;
 		mViewY = yoff;
 		glViewport(xoff, yoff, *mX, *mY);
@@ -1210,7 +1224,6 @@ void GLFbPC::render()
 	restoreGLState();
 	cMpvEngine::VideoParams vp;
 	vp.valid = false;
-	cMpvEngine *engine = cMpvEngine::getInstance();
 	if (engine)
 		vp = engine->getVideoParams();
 	if (!vp.valid)
@@ -1238,7 +1251,7 @@ void GLFbPC::render()
 			if (draw)
 			{
 				uint64_t t0 = SDL_GetTicksNS();
-				renderPlane();
+				renderPlane(engine);
 				uint64_t t = SDL_GetTicksNS() - t0;
 				mpv_render_context_report_swap(mRender);
 				mVideoValid = true;
@@ -1278,14 +1291,15 @@ void GLFbPC::render()
 		/* neutrino blits four times a second whether anything has changed
 		 * or not; each swap is a flip of the window's plane, and the video
 		 * flip that follows has to wait a frame for it */
-		uint64_t sum = osdChecksum();
+		int box[4];
+		uint64_t sum = osdScan(box);
 		if (sum == mOsdSum && !reinit && !mPlaneRedraw)
 			return;
 		mOsdSum = sum;
 		mPlaneRedraw = false;
 
 		/* the window: transparent where nothing but the video is */
-		bltOSDBuffer();
+		bltOSDBuffer(box);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(mViewX, mViewY, *mX, *mY);
 		glClearColor(0.0, 0.0, 0.0, 0.0);
@@ -1372,7 +1386,7 @@ void GLFbPC::render()
 	if (mPar != 1.0 || mFit[0] != 0 || mFit[1] != 0)
 	{
 		double fit[2] = { 0, (mPar != 1.0 && vp.valid && vp.dar > 0) ? vp.dar / mPar : 0 };
-		setVideoFit(fit);
+		setVideoFit(engine, fit);
 	}
 	if (mVideoValid)
 	{
@@ -1668,7 +1682,7 @@ bool GLFbPC::setupPlane(void *params)
  * is committed here; the GPU does no more than clear the target. The
  * target has the size of the window: mpv places the picture on the plane
  * where it would draw it there. */
-bool GLFbPC::renderPlane()
+bool GLFbPC::renderPlane(cMpvEngine *engine)
 {
 	int w = mWinW > 0 ? mWinW : 1, h = mWinH > 0 ? mWinH : 1;
 	if (!mPlaneFbo || w != mPlaneFboW || h != mPlaneFboH)
@@ -1685,7 +1699,7 @@ bool GLFbPC::renderPlane()
 		mPlaneFboW = w;
 		mPlaneFboH = h;
 	}
-	planeMargins();
+	planeMargins(engine);
 
 	mPlaneReq = drmModeAtomicAlloc();
 	mpv_opengl_fbo fbo = { (int)mPlaneFbo, w, h, 0 };
@@ -1719,7 +1733,7 @@ bool GLFbPC::renderPlane()
 
 /* the picture in the menus: what the GL quad got as position, mpv gets as
  * the room it leaves around the video */
-void GLFbPC::planeMargins()
+void GLFbPC::planeMargins(cMpvEngine *engine)
 {
 	double m[4] = { 0, 0, 0, 0 };
 	if (videoDecoder && videoDecoder->pig_x > 0 && videoDecoder->pig_y > 0 &&
@@ -1735,7 +1749,6 @@ void GLFbPC::planeMargins()
 		for (int i = 0; i < 4; i++)
 			m[i] = m[i] < 0 ? 0 : (m[i] > 1 ? 1 : m[i]);
 	}
-	cMpvEngine *engine = cMpvEngine::getInstance();
 	if (engine && memcmp(m, mMargins, sizeof(m)))
 	{
 		memcpy(mMargins, m, sizeof(m));
@@ -1770,12 +1783,11 @@ void GLFbPC::planeMargins()
 	}
 	if (fit[1] == 0 && mPar != 1.0 && mDar > 0)
 		fit[1] = mDar / mPar;
-	setVideoFit(fit);
+	setVideoFit(engine, fit);
 }
 
-void GLFbPC::setVideoFit(const double fit[2])
+void GLFbPC::setVideoFit(cMpvEngine *engine, const double fit[2])
 {
-	cMpvEngine *engine = cMpvEngine::getInstance();
 	if (engine && memcmp(fit, mFit, sizeof(mFit)))
 	{
 		memcpy(mFit, fit, sizeof(mFit));
@@ -1884,7 +1896,7 @@ void GLFbPC::drawSquare(float size, float x_factor)
 		 1.0f, -1.0f,
 	};
 
-	GLfloat texcoords[] =
+	static const GLfloat texcoords[] =
 	{
 		1.0, 0.0,
 		0.0, 0.0,
@@ -1932,24 +1944,73 @@ void GLFbPC::drawSquare(float size, float x_factor)
 }
 
 
-void GLFbPC::bltOSDBuffer()
+/* The texture gets the rows that show something now or did so at the last
+ * blit, and the row on either side that a linear sample at the edge blends
+ * with. The rows left out are transparent in the buffer and were so when
+ * they were uploaded last, and only ever get sampled next to other such
+ * rows: they are never seen. */
+void GLFbPC::bltOSDBuffer(const int *box)
 {
-	/* FIXME: copy each time */
+	int scan[4];
+	if (!box)
+	{
+		osdScan(scan);
+		box = scan;
+	}
+	int y0 = 0, y1 = mOsdH;
+	if (!mOsdFull)
+	{
+		y0 = mOsdH;
+		y1 = 0;
+		if (box[3] > box[1])
+		{
+			y0 = box[1] - 1;
+			y1 = box[3] + 1;
+		}
+		if (mOsdBox[3] > mOsdBox[1])
+		{
+			y0 = std::min(y0, mOsdBox[1] - 1);
+			y1 = std::max(y1, mOsdBox[3] + 1);
+		}
+		y0 = std::max(y0, 0);
+		y1 = std::min(y1, mOsdH);
+	}
+	mOsdFull = false;
+	memcpy(mOsdBox, box, sizeof(mOsdBox));
+	if (y1 <= y0)
+		return;
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
-	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mOsdW, mOsdH, GL_RGBA, GL_UNSIGNED_BYTE, osd_buf->data());
+	/* GLES2 has no GL_UNPACK_ROW_LENGTH, so whole rows */
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y0, mOsdW, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE,
+			osd_buf->data() + (size_t)y0 * mOsdW * 4);
+}
 
-	/* where the OSD shows anything at all: nothing else of it has to be
-	 * drawn, and while a programme is watched that is mostly nothing */
+/* One pass over the OSD. box: where it shows anything at all - nothing else
+ * of it has to be drawn, and while a programme is watched that is mostly
+ * nothing. The sum is cheap enough for a few times a second, and an
+ * unchanged OSD has the same one. */
+uint64_t GLFbPC::osdScan(int box[4])
+{
 	const uint32_t *p = (const uint32_t *)osd_buf->data();
 	const int w = mOsdW, h = mOsdH;
 	int x0 = w, x1 = -1, y0 = h, y1 = -1;
+	uint64_t a = 0, b = 0, i = 0;
 	for (int y = 0; y < h; y++, p += w)
 	{
-		int l = 0;
-		while (l < w && !(p[l] & 0xff000000))
-			l++;
-		if (l == w)
+		uint32_t any = 0;
+		for (int x = 0; x < w; x++, i++)
+		{
+			const uint64_t v = p[x];
+			a += v;
+			b ^= v + i;
+			any |= p[x];
+		}
+		if (!(any & 0xff000000))
 			continue;
+		/* the row is in the cache now, finding its ends is cheap */
+		int l = 0;
+		while (!(p[l] & 0xff000000))
+			l++;
 		int r = w - 1;
 		while (!(p[r] & 0xff000000))
 			r--;
@@ -1961,25 +2022,11 @@ void GLFbPC::bltOSDBuffer()
 			y0 = y;
 		y1 = y;
 	}
-	mOsdBox[0] = x0;
-	mOsdBox[1] = y0;
-	mOsdBox[2] = x1 + 1;
-	mOsdBox[3] = y1 + 1;
-}
-
-/* cheap enough for a few times a second, and an unchanged OSD has the
- * same sum */
-uint64_t GLFbPC::osdChecksum()
-{
-	const uint64_t *p = (const uint64_t *)osd_buf->data();
-	size_t n = (size_t)mOsdW * mOsdH * 4 / sizeof(uint64_t);
-	uint64_t a = 0, b = 0;
-	for (size_t i = 0; i < n; i++)
-	{
-		a += p[i];
-		b ^= p[i] + i;
-	}
-	return a ^ (b << 1) ^ n;
+	box[0] = x0;
+	box[1] = y0;
+	box[2] = x1 + 1;
+	box[3] = y1 + 1;
+	return a ^ (b << 1) ^ i;
 }
 
 void GLFbPC::drawOSD()

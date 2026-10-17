@@ -207,6 +207,14 @@ class cMpvEngine : public OpenThreads::Thread
 
 		OpenThreads::Mutex mVideoLock;
 		VideoParams mVideo;
+
+		/* the track-list as read last; mpv reports changes to it, and
+		 * what is asked of mpv here that may change it drops the copy */
+		OpenThreads::Mutex mTracksLock;
+		std::vector<Track> mTracks;
+		bool mTracksValid;
+		unsigned mTracksGen;
+		void tracksChanged();
 };
 
 #endif // __MPV_PLAYER_H__

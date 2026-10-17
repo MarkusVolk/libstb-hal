@@ -106,8 +106,15 @@ static void sinkWrite(AudioSink &s, const void *buf, int size)
 	if (!s.stream)
 		return;
 	SDL_PutAudioStreamData(s.stream, buf, size);
-	while (SDL_GetAudioStreamQueued(s.stream) > s.maxQueued)
-		usleep(2000);
+	/* sleep for as long as the surplus takes to play rather than poll for
+	 * it: the queue still holds maxQueued by then, so it cannot run dry */
+	const int bytesPerSec = s.spec.freq * s.spec.channels * SDL_AUDIO_BYTESIZE(s.spec.format);
+	int queued;
+	while ((queued = SDL_GetAudioStreamQueued(s.stream)) > s.maxQueued)
+	{
+		int64_t us = bytesPerSec > 0 ? (int64_t)(queued - s.maxQueued) * 1000000 / bytesPerSec : 2000;
+		usleep(us < 2000 ? 2000 : us);
+	}
 }
 
 static void sinkClose(AudioSink &s)

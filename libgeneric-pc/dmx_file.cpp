@@ -242,6 +242,9 @@ void cTsFile::run()
 		}
 		have += r;
 		int pos = 0;
+		/* the lock is held across the packets of a batch, not per packet,
+		 * and given up around the wait for the stream's clock */
+		bool locked = false;
 		while (have - pos >= TS_SIZE && !quit)
 		{
 			if (buf[pos] != 0x47)
@@ -270,14 +273,24 @@ void cTsFile::run()
 				}
 				else if (due > wall)
 				{
+					if (locked)
+					{
+						lock.unlock();
+						locked = false;
+					}
 					flush();
 					usleep(due - wall);
 				}
 			}
-			lock.lock();
+			if (!locked)
+			{
+				lock.lock();
+				locked = true;
+			}
 			packet(p);
-			lock.unlock();
 		}
+		if (locked)
+			lock.unlock();
 		flush();
 		have -= pos;
 		if (have > 0)

@@ -55,6 +55,7 @@ extern "C" {
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_VIDEO, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_VIDEO, this, args)
 #define hal_info_c(args...) _hal_info(HAL_DEBUG_VIDEO, NULL, args)
+#define hal_debug_c(args...) _hal_debug(HAL_DEBUG_VIDEO, NULL, args)
 
 cVideo *videoDecoder = NULL;
 extern cDemux *videoDemux;
@@ -1224,7 +1225,7 @@ static bool swscale(unsigned char *src, unsigned char *dst, int sw, int sh, int 
 		sws_freeContext(scale);
 		scale = NULL;
 	}
-	hal_info_c("%s: %s scale %ix%i to %ix%i ,len %i\n", ret ? " " : "ERROR", __func__, sw, sh, dw, dh, len);
+	hal_debug_c("%s: %s scale %ix%i to %ix%i ,len %i\n", ret ? " " : "ERROR", __func__, sw, sh, dw, dh, len);
 
 	return ret;
 }

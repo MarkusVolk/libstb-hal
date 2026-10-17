@@ -154,6 +154,7 @@ class GLFbPC
 		int mOsdW; /* the size the OSD texture has, the GL thread's copy */
 		int mOsdH;
 		bool mOsdResize;
+		bool mOsdFull; /* the next blit uploads the whole texture */
 		int mWantW; /* display mode asked for with setDisplayMode() */
 		int mWantH;
 		float mWantRate;
@@ -177,14 +178,14 @@ class GLFbPC
 		double mFit[2]; /* panscan and stretched aspect sent to mpv */
 		double mDar; /* of the video, as decoded */
 		bool setupPlane(void *drm_params);
-		bool renderPlane();
-		void planeMargins();
-		void setVideoFit(const double fit[2]);
+		bool renderPlane(cMpvEngine *engine);
+		void planeMargins(cMpvEngine *engine);
+		void setVideoFit(cMpvEngine *engine, const double fit[2]);
 		int mWinW; /* the window in pixels, the viewport may be smaller */
 		int mWinH;
 		bool mTexStale; /* the video was drawn directly, mVideoTex has an old frame */
 		void drawOSD();
-		uint64_t osdChecksum();
+		uint64_t osdScan(int box[4]); /* one pass: where the OSD shows anything, and a sum of it */
 		uint64_t mOsdSum; /* of the OSD that is on the window's plane */
 		bool mPlaneRedraw;
 		bool directVideo(int w, int h);
@@ -231,7 +232,7 @@ class GLFbPC
 			float xproj;
 		} mState;
 
-		void bltOSDBuffer();
+		void bltOSDBuffer(const int *box = NULL); /* box: what osdScan() found, NULL scans */
 		void bltDisplayBuffer();
 };
 #endif
