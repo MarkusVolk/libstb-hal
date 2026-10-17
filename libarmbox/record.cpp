@@ -55,6 +55,7 @@ cRecord::cRecord(int num, int bs_dmx, int bs)
 	record_thread_running = false;
 	file_fd = -1;
 	exit_flag = RECORD_STOPPED;
+	state = REC_STATUS_OK;
 	dmx_num = num;
 	bufsize = bs;
 	bufsize_dmx = bs_dmx;
@@ -100,6 +101,7 @@ bool cRecord::Start(int fd, unsigned short vpid, unsigned short *apids, int nump
 
 	file_fd = fd;
 	exit_flag = RECORD_RUNNING;
+	state = REC_STATUS_OK;
 	if (posix_fadvise(file_fd, 0, 0, POSIX_FADV_DONTNEED))
 		perror("posix_fadvise");
 
@@ -420,10 +422,23 @@ void cRecord::RecordThread()
 
 int cRecord::GetStatus()
 {
-	return (exit_flag == RECORD_STOPPED) ? REC_STATUS_STOPPED : REC_STATUS_OK;
+	int status = state;
+	switch (exit_flag)
+	{
+		case RECORD_RUNNING:
+			break;
+		case RECORD_FAILED_READ:
+		case RECORD_FAILED_OVERFLOW:
+			status |= REC_STATUS_OVERFLOW;
+			/* fall through */
+		default: /* RECORD_STOPPED and the other RECORD_FAILED_* */
+			status |= REC_STATUS_STOPPED;
+			break;
+	}
+	return status;
 }
 
 void cRecord::ResetStatus()
 {
-	return;
+	state = REC_STATUS_OK;
 }

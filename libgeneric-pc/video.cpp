@@ -94,8 +94,8 @@ static const AVRational aspect_ratios[8] =
 	{ 16, 9 },
 	{ 20, 9 },
 	{ 21, 9 },
-	{ 16, 10 },
-	{ -1, -1 }
+	{ -1, -1 },
+	{ 16, 10 }
 };
 
 static AVCodecID fallback_codec_for_format(VIDEO_FORMAT format)
@@ -164,7 +164,7 @@ int cVideo::setAspectRatio(int vformat, int cropping)
 		display_aspect = (DISPLAY_AR) vformat;
 	if (cropping >= 0)
 		display_crop = (DISPLAY_AR_MODE) cropping;
-	if (display_aspect < DISPLAY_AR_RAW && output_h > 0) /* don't know what to do with this */
+	if (display_aspect <= DISPLAY_AR_16_10 && display_aspect != DISPLAY_AR_RAW && output_h > 0) /* don't know what to do with this */
 		glfb_priv->setOutputFormat(aspect_ratios[display_aspect], output_h, display_crop,
 					   display_aspect == DISPLAY_AR_21_9 || display_aspect == DISPLAY_AR_16_10);
 	return 0;
@@ -387,7 +387,7 @@ int cVideo::SetVideoSystem(int system, bool)
 	output_h = h;
 	/* where the window owns the display, this is its mode from now on */
 	glfb_priv->setDisplayMode(w, h, rate);
-	if (display_aspect < DISPLAY_AR_RAW && output_h > 0) /* don't know what to do with this */
+	if (display_aspect <= DISPLAY_AR_16_10 && display_aspect != DISPLAY_AR_RAW && output_h > 0) /* don't know what to do with this */
 		glfb_priv->setOutputFormat(aspect_ratios[display_aspect], output_h, display_crop,
 					   display_aspect == DISPLAY_AR_21_9 || display_aspect == DISPLAY_AR_16_10);
 	return 0;

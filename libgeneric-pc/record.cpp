@@ -379,10 +379,23 @@ void cRecord::RecordThread()
 
 int cRecord::GetStatus()
 {
-	return (exit_flag == RECORD_STOPPED) ? REC_STATUS_STOPPED : REC_STATUS_OK;
+	int status = state;
+	switch (exit_flag)
+	{
+		case RECORD_RUNNING:
+			break;
+		case RECORD_FAILED_READ:
+		case RECORD_FAILED_OVERFLOW:
+			status |= REC_STATUS_OVERFLOW;
+			/* fall through */
+		default: /* RECORD_STOPPED and the other RECORD_FAILED_* */
+			status |= REC_STATUS_STOPPED;
+			break;
+	}
+	return status;
 }
 
 void cRecord::ResetStatus()
 {
-	return;
+	state = REC_STATUS_OK;
 }

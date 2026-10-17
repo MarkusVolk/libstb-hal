@@ -108,6 +108,7 @@ ssize_t WriteWithRetry(Context_t *context, int pipefd, int fd, void *pDVBMtx __a
 	fd_set wfds;
 
 	ssize_t ret;
+	ssize_t written = 0;
 	int retval = -1;
 	int maxFd = pipefd > fd ? pipefd : fd;
 	struct timeval tv;
@@ -134,7 +135,7 @@ ssize_t WriteWithRetry(Context_t *context, int pipefd, int fd, void *pDVBMtx __a
 		retval = select(maxFd + 1, &rfds, &wfds, NULL, NULL); //&tv);
 		if (retval < 0)
 		{
-			break;
+			return -1;
 		}
 
 		//if (retval == 0)
@@ -155,21 +156,9 @@ ssize_t WriteWithRetry(Context_t *context, int pipefd, int fd, void *pDVBMtx __a
 			ret = write(fd, buf, size);
 			if (ret < 0)
 			{
-				switch (errno)
-				{
-					case EINTR:
-					case EAGAIN:
-						continue;
-					default:
-						retval = -3;
-						break;
-				}
-				if (retval < 0)
-				{
-					break;
-				}
-
-				return ret;
+				if (errno == EINTR || errno == EAGAIN)
+					continue;
+				return -1;
 			}
 			else if (ret == 0)
 			{
@@ -185,9 +174,11 @@ ssize_t WriteWithRetry(Context_t *context, int pipefd, int fd, void *pDVBMtx __a
 
 			size -= ret;
 			buf += ret;
+			written += ret;
 		}
 	}
-	return 0;
+	/* negative when stopped or seeking before everything was written */
+	return size > 0 ? -1 : written;
 }
 
 ssize_t write_with_retry(int fd, const void *buf, int size)

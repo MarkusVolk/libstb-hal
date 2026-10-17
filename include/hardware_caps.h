@@ -65,7 +65,6 @@ typedef struct hw_caps
 	int can_zapping_mode;
 	int can_hdmi_colorimetry;
 	int can_ar_21_9;
-	int can_ar_16_10;
 	int can_select_audio_output; /* HDMI, S/PDIF, analog, USB, Bluetooth */
 	int can_live_pause; /* live TV can be held in a buffer */
 	int video_needs_blank_frame; /* stopFrame() leaves a picture, a black frame is drawn */
@@ -100,6 +99,7 @@ typedef struct hw_caps
 	int nim_socket_vuplus_format; /* /proc/bus/nim_sockets names the tuner the VU+ way */
 	int multiboot_first_partition; /* mmcblk0p<n> is the first image slot, 0: no such layout */
 	int multiboot_devicetree; /* the slot is read from the device tree */
+	int can_ar_16_10; /* appended last: keeps the layout of older headers */
 } hw_caps_t;
 
 hw_caps_t *get_hwcaps(void);

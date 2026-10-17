@@ -45,7 +45,8 @@
 /* ***************************** */
 
 static pthread_t supervisorThread;
-static volatile int hasThreadStarted = 0; /* shared with the detached supervisor thread */
+static int supervisorJoinable = 0; /* created and not yet joined */
+static volatile int hasThreadStarted = 0; /* shared with the supervisor thread */
 static pthread_mutex_t supervisorMtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t supervisorCond = PTHREAD_COND_INITIALIZER;
 
@@ -85,6 +86,16 @@ static int waitThreadStarted(int state, int wait_time)
 	}
 	pthread_mutex_unlock(&supervisorMtx);
 	return busy ? 0 : wait_time;
+}
+
+/* the supervisor exits once its PlaybackTerminate() returns; joining it keeps context alive until then */
+static void joinSupervisor(void)
+{
+	if (supervisorJoinable && !pthread_equal(pthread_self(), supervisorThread))
+	{
+		pthread_join(supervisorThread, NULL);
+		supervisorJoinable = 0;
+	}
 }
 
 /* ***************************** */
@@ -308,6 +319,7 @@ static int PlaybackClose(Context_t *context)
 		context->playback->uri = NULL;
 	}
 
+	joinSupervisor();
 	PlaybackDieNow(2);
 	playback_printf(10, "exiting with value %d\n", ret);
 
@@ -316,7 +328,6 @@ static int PlaybackClose(Context_t *context)
 
 static int PlaybackPlay(Context_t *context)
 {
-	pthread_attr_t attr;
 	int ret = cERR_PLAYBACK_NO_ERROR;
 
 	playback_printf(10, "\n");
@@ -357,16 +368,16 @@ static int PlaybackPlay(Context_t *context)
 			if (hasThreadStarted == 0)
 			{
 				int error;
-				pthread_attr_init(&attr);
-				pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+				joinSupervisor();
 
-				if ((error = pthread_create(&supervisorThread, &attr, (void *)&SupervisorThread, context)) != 0)
+				if ((error = pthread_create(&supervisorThread, NULL, (void *)&SupervisorThread, context)) != 0)
 				{
 					playback_printf(10, "Error creating thread, error:%d:%s\n", error, strerror(error));
 					ret = cERR_PLAYBACK_ERROR;
 				}
 				else
 				{
+					supervisorJoinable = 1;
 					playback_printf(10, "Created thread\n");
 				}
 			}
@@ -500,6 +511,7 @@ static int32_t PlaybackStop(Context_t *context)
 		playback_err("Timeout waiting for thread!\n");
 		ret = cERR_PLAYBACK_ERROR;
 	}
+	joinSupervisor();
 
 	playback_printf(10, "exiting with value %d\n", ret);
 

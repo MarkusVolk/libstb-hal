@@ -209,7 +209,8 @@ static void LinuxDvbBuffThread(Context_t *context)
 			int fd = nodePtr->dataType == OUTPUT_VIDEO ? videofd : audiofd;
 			g_bDuringWrite = true;
 			pthread_mutex_unlock(&bufferingMtx);
-			if (0 != WriteWithRetry(context, g_pfd[0], fd, g_pDVBMtx, dataPtr, nodePtr->dataSize))
+			if (WriteWithRetry(context, g_pfd[0], fd, g_pDVBMtx, dataPtr, nodePtr->dataSize) < 0
+			    && !context->playback->isSeeking && PlaybackDieNow(0) == 0)
 			{
 				buff_err("Something is WRONG\n");
 			}
