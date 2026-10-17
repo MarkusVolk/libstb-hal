@@ -505,8 +505,18 @@ bool cVideo::ShowPicture(const char *fname)
 		goto out_free;
 	}
 	av_ret = avcodec_receive_frame(c, frame);
-	if (av_ret != 0 && av_ret != AVERROR(EAGAIN))
+	if (av_ret == AVERROR(EAGAIN))
+	{
+		/* a single picture: the decoder hands it out when drained */
+		avcodec_send_packet(c, NULL);
+		av_ret = avcodec_receive_frame(c, frame);
+	}
+	if (av_ret != 0)
+	{
+		hal_info("%s: avcodec_receive_frame %d\n", __func__, av_ret);
+		av_packet_unref(&avpkt);
 		goto out_free;
+	}
 
 	got_frame = 1;
 #endif
@@ -520,12 +530,14 @@ bool cVideo::ShowPicture(const char *fname)
 		if (src_fmt < 0 || src_fmt >= AV_PIX_FMT_NB || av_pix_fmt_desc_get(src_fmt) == NULL)
 		{
 			hal_info("%s: invalid pixel format frame=%d ctx=%d\n", __func__, frame->format, c->pix_fmt);
+			av_packet_unref(&avpkt);
 			goto out_free;
 		}
 		/* validate dimensions before swscale to prevent assertion failure */
 		if (c->width <= 0 || c->height <= 0)
 		{
 			hal_info("%s: invalid dimensions %dx%d\n", __func__, c->width, c->height);
+			av_packet_unref(&avpkt);
 			goto out_free;
 		}
 		unsigned int need = av_image_get_buffer_size(VDEC_PIXFMT, c->width, c->height, 1);
@@ -693,7 +705,7 @@ cVideo::SWFramebuffer *cVideo::getDecBuf(void)
 static int my_read(void *, uint8_t *buf, int buf_size)
 {
 	int tmp = 0;
-	if (videoDecoder && bufpos < DMX_BUF_SZ - 4096)
+	if (videoDecoder && videoDemux && bufpos < DMX_BUF_SZ - 4096)
 	{
 		while (bufpos < buf_size && ++tmp < 20) /* retry max 20 times */
 		{
@@ -892,7 +904,7 @@ void cVideo::run(void)
 	{
 		if (av_read_frame(avfc, &avpkt) < 0)
 		{
-			if (warn_r - time(NULL) > 4)
+			if (time(NULL) - warn_r > 4)
 			{
 				hal_info("%s: av_read_frame < 0\n", __func__);
 				warn_r = time(NULL);
@@ -912,7 +924,7 @@ void cVideo::run(void)
 		av_ret = avcodec_decode_video2(c, frame, &got_frame, &avpkt);
 		if (av_ret < 0)
 		{
-			if (warn_d - time(NULL) > 4)
+			if (time(NULL) - warn_d > 4)
 			{
 				hal_info("%s: avcodec_decode_video2 %d\n", __func__, av_ret);
 				warn_d = time(NULL);
@@ -926,7 +938,7 @@ void cVideo::run(void)
 		av_ret = avcodec_send_packet(c, &avpkt);
 		if (av_ret != 0 && av_ret != AVERROR(EAGAIN))
 		{
-			if (warn_d - time(NULL) > 4)
+			if (time(NULL) - warn_d > 4)
 			{
 				hal_info("%s: avcodec_send_packet %d\n", __func__, av_ret);
 				warn_d = time(NULL);
@@ -1185,13 +1197,11 @@ static bool swscale(unsigned char *src, unsigned char *dst, int sw, int sh, int 
 		if (len > -1)
 			ret = true;
 
-		if (ret && (len = av_image_fill_arrays(dframe->data, dframe->linesize, &(dst)[0], AV_PIX_FMT_RGB32, dw, dh, 1) < 0))
+		if (ret && (len = av_image_fill_arrays(dframe->data, dframe->linesize, &(dst)[0], AV_PIX_FMT_RGB32, dw, dh, 1)) < 0)
 			ret = false;
 
-		if (ret && (len = sws_scale(scale, sframe->data, sframe->linesize, 0, sh, dframe->data, dframe->linesize) < 0))
+		if (ret && (len = sws_scale(scale, sframe->data, sframe->linesize, 0, sh, dframe->data, dframe->linesize)) < 0)
 			ret = false;
-		else
-			ret = true;
 	}
 	else
 	{
@@ -1318,9 +1328,10 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 	if (get_osd)
 		osd = glfb_priv->getOSDBuffer();
 	unsigned int need = av_image_get_buffer_size(AV_PIX_FMT_RGB32, xres, yres, 1);
-	data = (unsigned char *)realloc(data, need); /* will be freed by caller */
-	if (data == NULL) /* out of memory? */
+	unsigned char *grown = (unsigned char *)realloc(data, need); /* will be freed by caller */
+	if (grown == NULL) /* out of memory? the caller still owns its old buffer */
 		return false;
+	data = grown;
 
 	if (get_video)
 	{
@@ -1330,6 +1341,7 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 			if (!ret)
 			{
 				free(data);
+				data = NULL;
 				return false;
 			}
 		}
@@ -1347,6 +1359,7 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 		if (!ret)
 		{
 			free(data);
+			data = NULL;
 			return false;
 		}
 		osd = &s_osd;

@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include <atomic>
 #include <map>
 #include <set>
 #include <vector>
@@ -84,9 +85,11 @@ class cTsFile : public OpenThreads::Thread
 		OpenThreads::Mutex lock;
 
 		void run();
+		void shutdown();
 
 	private:
 		cTsFile();
+		std::atomic<bool> quit;
 		void packet(const uint8_t *p);
 		void sectionData(uint16_t pid, const uint8_t *p, int len, bool start, int cc);
 		void sectionsOut(uint16_t pid, SectionBuf &sb);
@@ -150,11 +153,12 @@ bool tsfile_enabled(void)
 	return enabled == 1;
 }
 
+static OpenThreads::Mutex instance_lock;
+static cTsFile *instance = NULL;
+
 cTsFile *cTsFile::getInstance()
 {
-	static OpenThreads::Mutex m;
-	static cTsFile *instance = NULL;
-	OpenThreads::ScopedLock<OpenThreads::Mutex> l(m);
+	OpenThreads::ScopedLock<OpenThreads::Mutex> l(instance_lock);
 	if (!instance)
 	{
 		instance = new cTsFile();
@@ -163,8 +167,28 @@ cTsFile *cTsFile::getInstance()
 	return instance;
 }
 
+/* the object stays: the filters that are closed after this still find it,
+ * only its thread is gone */
+void tsfile_shutdown(void)
+{
+	OpenThreads::ScopedLock<OpenThreads::Mutex> l(instance_lock);
+	if (instance)
+		instance->shutdown();
+}
+
+void cTsFile::shutdown()
+{
+	quit = true;
+	if (isRunning())
+		join();
+	if (fd >= 0)
+		close(fd);
+	fd = -1;
+}
+
 cTsFile::cTsFile()
 {
+	quit = false;
 	fd = -1;
 	rate = 1.0;
 	const char *r = getenv("HAL_TSDMX_RATE");
@@ -200,7 +224,7 @@ void cTsFile::run()
 
 	uint8_t buf[TS_SIZE * 64];
 	int have = 0;
-	while (true)
+	while (!quit)
 	{
 		int r = read(fd, buf + have, sizeof(buf) - have);
 		if (r <= 0)
@@ -218,7 +242,7 @@ void cTsFile::run()
 		}
 		have += r;
 		int pos = 0;
-		while (have - pos >= TS_SIZE)
+		while (have - pos >= TS_SIZE && !quit)
 		{
 			if (buf[pos] != 0x47)
 			{

@@ -56,6 +56,7 @@ void hal_live_pids(uint16_t &vpid, uint16_t &apid, uint16_t &pcrpid);
 #define NEUTRINO_MPV_CONF "/etc/neutrino/mpv.conf"
 
 cMpvEngine *cMpvEngine::instance = NULL;
+bool cMpvEngine::instanceGone = false;
 static OpenThreads::Mutex instanceLock;
 
 /*
@@ -345,7 +346,7 @@ static int live_open(void *user_data, char *uri, mpv_stream_cb_info *info)
 cMpvEngine *cMpvEngine::getInstance()
 {
 	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(instanceLock);
-	if (!instance)
+	if (!instance && !instanceGone)
 	{
 		cMpvEngine *e = new cMpvEngine();
 		if (!e->mpv)
@@ -361,6 +362,7 @@ cMpvEngine *cMpvEngine::getInstance()
 void cMpvEngine::shutdown()
 {
 	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(instanceLock);
+	instanceGone = true;
 	delete instance;
 	instance = NULL;
 }

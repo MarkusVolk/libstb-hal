@@ -21,6 +21,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -32,6 +33,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 
 #include <linux/input.h>
 
@@ -72,13 +74,12 @@
 
 hdmi_cec *hdmi_cec::hdmi_cec_instance = NULL;
 
-//hack to get an instance before first call
-hdmi_cec *CEC = hdmi_cec::getInstance();
-
 hdmi_cec::hdmi_cec()
 {
 	standby_cec_activ = autoview_cec_activ = standby = muted = false;
+	running = false;
 	hdmiFd = -1;
+	wakeFd = -1;
 	volume = 0;
 	fallback = false;
 	tv_off = true;
@@ -94,10 +95,17 @@ hdmi_cec::~hdmi_cec()
 		close(hdmiFd);
 		hdmiFd = -1;
 	}
+	if (wakeFd >= 0)
+	{
+		close(wakeFd);
+		wakeFd = -1;
+	}
 }
 
 hdmi_cec *hdmi_cec::getInstance()
 {
+	static std::mutex lock;
+	std::lock_guard<std::mutex> l(lock);
 	if (hdmi_cec_instance == NULL)
 	{
 		hdmi_cec_instance = new hdmi_cec();
@@ -168,7 +176,7 @@ bool hdmi_cec::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)
 				 */
 				laddrs.cec_version = CEC_OP_CEC_VERSION_2_0;
 				hw_caps_t *_caps = get_hwcaps();
-				strcpy(laddrs.osd_name, _caps->boxname);
+				snprintf(laddrs.osd_name, sizeof(laddrs.osd_name), "%s", _caps->boxname);
 				laddrs.vendor_id = CEC_VENDOR_ID_NONE;
 
 				switch (deviceType)
@@ -311,13 +319,16 @@ void hdmi_cec::SendCECMessage(struct cec_message &txmessage, int sleeptime)
 {
 	if (hdmiFd >= 0)
 	{
-
-		char str[txmessage.length * 6];
-		for (int i = 0; i < txmessage.length; i++)
+		if (debuglevel & (1 << HAL_DEBUG_INIT))
 		{
-			sprintf(str + (i * 6), "[0x%02X]", txmessage.data[i]);
+			char str[txmessage.length * 6 + 1];
+			str[0] = 0;
+			for (int i = 0; i < txmessage.length; i++)
+			{
+				sprintf(str + (i * 6), "[0x%02X]", txmessage.data[i]);
+			}
+			hal_debug(GREEN "[CEC] send message %s to %s (0x%02X>>0x%02X) '%s' (%s)\n" NORMAL, ToString((cec_logical_address)txmessage.initiator), txmessage.destination == 0xf ? "all" : ToString((cec_logical_address)txmessage.destination), txmessage.initiator, txmessage.destination, ToString((cec_opcode)txmessage.data[0]), str);
 		}
-		hal_info(GREEN "[CEC] send message %s to %s (0x%02X>>0x%02X) '%s' (%s)\n" NORMAL, ToString((cec_logical_address)txmessage.initiator), txmessage.destination == 0xf ? "all" : ToString((cec_logical_address)txmessage.destination), txmessage.initiator, txmessage.destination, ToString((cec_opcode)txmessage.data[0]), str);
 
 		if (fallback)
 		{
@@ -563,9 +574,16 @@ bool hdmi_cec::Start()
 	if (hdmiFd == -1)
 		return false;
 
+	if (wakeFd < 0)
+		wakeFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	running = true;
 	OpenThreads::Thread::setSchedulePriority(THREAD_PRIORITY_MIN);
-	return (OpenThreads::Thread::start() == 0);
+	if (OpenThreads::Thread::start() != 0)
+	{
+		running = false;
+		return false;
+	}
+	return true;
 }
 
 bool hdmi_cec::Stop()
@@ -575,27 +593,50 @@ bool hdmi_cec::Stop()
 
 	running = false;
 
-	OpenThreads::Thread::cancel();
+	/* the thread sees running == false and leaves, the fds are closed after the join */
+	if (wakeFd >= 0)
+	{
+		uint64_t one = 1;
+		if (::write(wakeFd, &one, sizeof(one)) != (ssize_t)sizeof(one))
+			hal_info(RED "[CEC] %s: wakeup failed (%m)\n" NORMAL, __func__);
+	}
+	bool ret = (OpenThreads::Thread::join() == 0);
 
 	if (hdmiFd >= 0)
 	{
 		close(hdmiFd);
 		hdmiFd = -1;
 	}
+	if (wakeFd >= 0)
+	{
+		close(wakeFd);
+		wakeFd = -1;
+	}
 
-	return (OpenThreads::Thread::join() == 0);
+	return ret;
 }
 
 void hdmi_cec::run()
 {
-	OpenThreads::Thread::setCancelModeAsynchronous();
 	int n;
-	int epollfd = epoll_create1(0);
-	struct epoll_event event;
+	int epollfd = epoll_create1(EPOLL_CLOEXEC);
+	if (epollfd < 0)
+	{
+		hal_info(RED "[CEC] %s: epoll_create1 failed (%m)\n" NORMAL, __func__);
+		return;
+	}
+	struct epoll_event event = {};
 	event.data.fd = hdmiFd;
 	event.events = EPOLLIN | EPOLLPRI;
 
-	epoll_ctl(epollfd, EPOLL_CTL_ADD, hdmiFd, &event);
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, hdmiFd, &event) < 0)
+		hal_info(RED "[CEC] %s: epoll_ctl failed (%m)\n" NORMAL, __func__);
+	if (wakeFd >= 0)
+	{
+		event.data.fd = wakeFd;
+		event.events = EPOLLIN;
+		epoll_ctl(epollfd, EPOLL_CTL_ADD, wakeFd, &event);
+	}
 
 	std::array<struct epoll_event, EPOLL_MAX_EVENTS> events;
 
@@ -604,12 +645,15 @@ void hdmi_cec::run()
 		n = epoll_wait(epollfd, events.data(), EPOLL_MAX_EVENTS, EPOLL_WAIT_TIMEOUT);
 		for (int i = 0; i < n; ++i)
 		{
+			if (events[i].data.fd != hdmiFd) /* the wakeup of Stop() */
+				continue;
 			if (events[i].events & EPOLLPRI)
 				stateChanged();
 			if (events[i].events & EPOLLIN)
 				Receive(events[i].events);
 		}
 	}
+	close(epollfd);
 }
 
 /* The adapter has its addresses only some time after it was set up, and loses
@@ -644,7 +688,7 @@ void hdmi_cec::Receive(int what)
 		if (fallback)
 		{
 			struct cec_msg msg;
-			if (::ioctl(hdmiFd, CEC_RECEIVE, &msg) >= 0)
+			if (::ioctl(hdmiFd, CEC_RECEIVE, &msg) >= 0 && msg.len >= 1 && msg.len <= sizeof(msg.msg))
 			{
 				rxmessage.length = msg.len - 1;
 				rxmessage.initiator = cec_msg_initiator(&msg);
@@ -676,12 +720,16 @@ void hdmi_cec::Receive(int what)
 			bool keypressed = false;
 			static unsigned char pressedkey = 0;
 
-			char str[rxmessage.length * 6];
-			for (int i = 0; i < rxmessage.length; i++)
+			if (debuglevel & (1 << HAL_DEBUG_INIT))
 			{
-				sprintf(str + (i * 6), "[0x%02X]", rxmessage.data[i]);
+				char str[rxmessage.length * 6 + 1];
+				str[0] = 0;
+				for (int i = 0; i < rxmessage.length; i++)
+				{
+					sprintf(str + (i * 6), "[0x%02X]", rxmessage.data[i]);
+				}
+				hal_debug(GREEN "[CEC] received message %s to %s (0x%02X>>0x%02X) '%s' (%s)\n" NORMAL, ToString((cec_logical_address)rxmessage.initiator), rxmessage.destination == 0xf ? "all" : ToString((cec_logical_address)rxmessage.destination), rxmessage.initiator, rxmessage.destination, ToString((cec_opcode)rxmessage.opcode), str);
 			}
-			hal_info(GREEN "[CEC] received message %s to %s (0x%02X>>0x%02X) '%s' (%s)\n" NORMAL, ToString((cec_logical_address)rxmessage.initiator), rxmessage.destination == 0xf ? "all" : ToString((cec_logical_address)rxmessage.destination), rxmessage.initiator, rxmessage.destination, ToString((cec_opcode)rxmessage.opcode), str);
 
 			switch (rxmessage.opcode)
 			{

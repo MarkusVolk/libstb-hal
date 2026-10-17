@@ -623,14 +623,10 @@ void cAudio::run()
 		else
 		{
 			av_ret = avcodec_receive_frame(c, frame);
-			if (av_ret != 0 && av_ret != AVERROR(EAGAIN))
-			{
-				hal_info("%s: avcodec_send_packet %d\n", __func__, av_ret);
-			}
-			else
-			{
+			if (av_ret == 0)
 				gotframe = 1;
-			}
+			else if (av_ret != AVERROR(EAGAIN))
+				hal_info("%s: avcodec_receive_frame %d\n", __func__, av_ret);
 		}
 #endif
 
@@ -761,7 +757,6 @@ void cAudio::run()
 	}
 	av_free(obuf);
 	swr_free(&swr);
-out3:
 	av_frame_free(&frame);
 out2:
 	{
@@ -770,6 +765,7 @@ out2:
 	}
 out:
 	avformat_close_input(&avfc);
+	p = NULL; /* pointed into avfc */
 	if (pIOCtx)
 	{
 		av_free(pIOCtx->buffer);

@@ -1,7 +1,6 @@
 #ifndef __RECORD_LIB_H__
 #define __RECORD_LIB_H__
 
-#include <semaphore.h>
 #include "dmx_hal.h"
 
 #define REC_STATUS_OK 0
@@ -33,11 +32,6 @@ class cRecord
 		int bufsize_dmx;
 		void (*failureCallback)(void *);
 		void *failureData;
-
-		sem_t sem;
-#define RECORD_WRITER_CHUNKS 16
-		unsigned char *io_buf[RECORD_WRITER_CHUNKS];
-		size_t io_len[RECORD_WRITER_CHUNKS];
 	public:
 		cRecord(int num = 0, int bs_dmx = 2048 * 1024, int bs = 4096 * 1024);
 		void setFailureCallback(void (*f)(void *), void *d) { failureCallback = f; failureData = d; }
@@ -52,7 +46,6 @@ class cRecord
 		bool ChangePids(unsigned short vpid, unsigned short *apids, int numapids);
 
 		void RecordThread();
-		void WriterThread();
 };
 
 #endif // __RECORD_LIB_H__

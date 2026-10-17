@@ -49,5 +49,7 @@ void tsfile_add_pid(TsFileFilter *f, uint16_t pid);
 void tsfile_remove_pid(TsFileFilter *f, uint16_t pid);
 void tsfile_start(TsFileFilter *f);
 void tsfile_stop(TsFileFilter *f);
+/* hal_api_exit(): the reader thread ends, the file is closed */
+void tsfile_shutdown(void);
 
 #endif // __DMX_FILE_H__

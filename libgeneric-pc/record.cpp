@@ -24,13 +24,6 @@ void *execute_record_thread(void *c)
 	return NULL;
 }
 
-void *execute_writer_thread(void *c)
-{
-	cRecord *obj = (cRecord *)c;
-	obj->WriterThread();
-	return NULL;
-}
-
 cRecord::cRecord(int num, int bs_dmx, int bs)
 {
 	hal_info("%s %d\n", __func__, num);
@@ -38,6 +31,7 @@ cRecord::cRecord(int num, int bs_dmx, int bs)
 	record_thread_running = false;
 	file_fd = -1;
 	exit_flag = RECORD_STOPPED;
+	state = REC_STATUS_OK;
 	dmx_num = num;
 	bufsize = bs;
 	bufsize_dmx = bs_dmx;
@@ -83,6 +77,7 @@ bool cRecord::Start(int fd, unsigned short vpid, unsigned short *apids, int nump
 
 	file_fd = fd;
 	exit_flag = RECORD_RUNNING;
+	state = REC_STATUS_OK;
 	if (posix_fadvise(file_fd, 0, 0, POSIX_FADV_DONTNEED))
 		perror("posix_fadvise");
 
@@ -191,34 +186,6 @@ bool cRecord::AddPid(unsigned short pid)
 	return dmx->addPid(pid);
 }
 
-void cRecord::WriterThread()
-{
-	char threadname[17];
-	strncpy(threadname, "WriterThread", sizeof(threadname));
-	threadname[16] = 0;
-	prctl(PR_SET_NAME, (unsigned long)&threadname);
-	unsigned int chunk = 0;
-	while (!sem_wait(&sem))
-	{
-		if (!io_len[chunk]) // empty, assume end of recording
-			return;
-		unsigned char *p_buf = io_buf[chunk];
-		size_t p_len = io_len[chunk];
-		while (p_len)
-		{
-			ssize_t written = write(file_fd, p_buf, p_len);
-			if (written < 0)
-				break;
-			p_len -= written;
-			p_buf += written;
-		}
-		if (posix_fadvise(file_fd, 0, 0, POSIX_FADV_DONTNEED))
-			perror("posix_fadvise");
-		chunk++;
-		chunk %= RECORD_WRITER_CHUNKS;
-	}
-}
-
 void cRecord::RecordThread()
 {
 	hal_info("%s: begin\n", __func__);
@@ -230,6 +197,7 @@ void cRecord::RecordThread()
 	int buf_pos = 0;
 	int count = 0;
 	int queued = 0;
+	bool queued_aio = false; /* a is submitted and not yet collected */
 	uint8_t *buf;
 	struct aiocb a;
 
@@ -305,28 +273,34 @@ void cRecord::RecordThread()
 				hal_info("%s: buffer full! Overflow? (%d)\n", __func__, ++overflow_count);
 			state = REC_STATUS_SLOW;
 		}
-		r = aio_error(&a);
-		if (r == EINPROGRESS)
+		r = 0;
+		if (queued_aio)
 		{
-			hal_debug("%s: aio in progress, free: %d\n", __func__, bufsize - buf_pos);
-			continue;
+			r = aio_error(&a);
+			if (r == EINPROGRESS)
+			{
+				hal_debug("%s: aio in progress, free: %d\n", __func__, bufsize - buf_pos);
+				continue;
+			}
+			// not calling aio_return causes a memory leak --martii
+			r = aio_return(&a);
+			queued_aio = false;
+			if (r < 0)
+			{
+				exit_flag = RECORD_FAILED_FILE;
+				hal_debug("%s: aio_return = %d (%m)\n", __func__, r);
+				break;
+			}
+			else
+				hal_debug("%s: aio_return = %d, free: %d\n", __func__, r, bufsize - buf_pos);
+			if (posix_fadvise(file_fd, 0, 0, POSIX_FADV_DONTNEED))
+				perror("posix_fadvise");
 		}
-		// not calling aio_return causes a memory leak --martii
-		r = aio_return(&a);
-		if (r < 0)
+		/* what the write did not take (a short write) is submitted again */
+		if (r > 0)
 		{
-			exit_flag = RECORD_FAILED_FILE;
-			hal_debug("%s: aio_return = %d (%m)\n", __func__, r);
-			break;
-		}
-		else
-			hal_debug("%s: aio_return = %d, free: %d\n", __func__, r, bufsize - buf_pos);
-		if (posix_fadvise(file_fd, 0, 0, POSIX_FADV_DONTNEED))
-			perror("posix_fadvise");
-		if (queued)
-		{
-			memmove(buf, buf + queued, buf_pos - queued);
-			buf_pos -= queued;
+			memmove(buf, buf + r, buf_pos - r);
+			buf_pos -= r;
 		}
 		queued = buf_pos;
 		a.aio_buf = buf;
@@ -338,32 +312,48 @@ void cRecord::RecordThread()
 			exit_flag = RECORD_FAILED_FILE;
 			break;
 		}
+		queued_aio = true;
 	}
 	dmx->Stop();
 	while (true) /* write out the unwritten buffer content */
 	{
 		hal_debug("%s: run-out write, buf_pos %d\n", __func__, buf_pos);
-		r = aio_error(&a);
-		if (r == EINPROGRESS)
+		r = 0;
+		if (queued_aio)
 		{
-			usleep(50000);
-			continue;
+			r = aio_error(&a);
+			if (r == EINPROGRESS)
+			{
+				usleep(50000);
+				continue;
+			}
+			r = aio_return(&a);
+			queued_aio = false;
+			if (r < 0)
+			{
+				exit_flag = RECORD_FAILED_FILE;
+				hal_info("%s: aio_result: %d (%m)\n", __func__, r);
+				break;
+			}
 		}
-		r = aio_return(&a);
-		if (r < 0)
+		if (r > 0)
 		{
-			exit_flag = RECORD_FAILED_FILE;
-			hal_info("%s: aio_result: %d (%m)\n", __func__, r);
-			break;
+			memmove(buf, buf + r, buf_pos - r);
+			buf_pos -= r;
 		}
-		if (!queued)
+		if (!buf_pos)
 			break;
-		memmove(buf, buf + queued, buf_pos - queued);
-		buf_pos -= queued;
 		queued = buf_pos;
 		a.aio_buf = buf;
 		a.aio_nbytes = queued;
 		r = aio_write(&a);
+		if (r)
+		{
+			hal_info("%s: aio_write %d (%m)\n", __func__, r);
+			exit_flag = RECORD_FAILED_FILE;
+			break;
+		}
+		queued_aio = true;
 	}
 	free(buf);
 

@@ -106,6 +106,16 @@ static int live_index(DMX_CHANNEL_TYPE t)
 	}
 }
 
+static void live_set_pid(DMX_CHANNEL_TYPE t, uint16_t pid)
+{
+	int i = live_index(t);
+	if (i < 0)
+		return;
+	live_lock.lock();
+	live_pid[i] = pid;
+	live_lock.unlock();
+}
+
 void hal_live_pids(uint16_t &vpid, uint16_t &apid, uint16_t &pcrpid)
 {
 	live_lock.lock();
@@ -142,8 +152,11 @@ bool cDemux::Open(DMX_CHANNEL_TYPE pes_type, void * /*hVideoBuffer*/, int uBuffe
 {
 	int devnum = num;
 	int flags = O_RDWR | O_CLOEXEC;
-	if (fd > -1)
+	if (fd > -1 || pdata)
+	{
 		hal_info("%s FD ALREADY OPENED? fd = %d\n", __FUNCTION__, fd);
+		Close();
+	}
 
 	dmx_type = pes_type;
 	if (pes_type != DMX_PSI_CHANNEL)
@@ -182,6 +195,8 @@ bool cDemux::Open(DMX_CHANNEL_TYPE pes_type, void * /*hVideoBuffer*/, int uBuffe
 		uBufferSize = 0x100000; /* 1MB */
 	if (dmx_type == DMX_AUDIO_CHANNEL)
 		uBufferSize = 0x10000; /* 64k */
+	if (dmx_type == DMX_TP_CHANNEL)
+		dmx_tp_count++;
 #if 0
 	if (!pesfds.empty())
 	{
@@ -210,11 +225,7 @@ void cDemux::Close(void)
 	{
 		bool done = PRIV->live || PRIV->file;
 		if (PRIV->live)
-		{
-			live_lock.lock();
-			live_pid[live_index(dmx_type)] = 0;
-			live_lock.unlock();
-		}
+			live_set_pid(dmx_type, 0);
 		if (PRIV->file)
 		{
 			tsfile_close(PRIV->file);
@@ -272,9 +283,7 @@ bool cDemux::Stop(void)
 	hal_debug("%s #%d fd: %d type: %s\n", __func__, num, fd, DMX_T[dmx_type]);
 	if (pdata && PRIV->live)
 	{
-		live_lock.lock();
-		live_pid[live_index(dmx_type)] = 0;
-		live_lock.unlock();
+		live_set_pid(dmx_type, 0);
 		return true;
 	}
 	if (pdata && PRIV->file)
@@ -529,9 +538,7 @@ bool cDemux::pesFilter(const unsigned short _pid)
 
 	if (pdata && PRIV->live)
 	{
-		live_lock.lock();
-		live_pid[live_index(dmx_type)] = pid;
-		live_lock.unlock();
+		live_set_pid(dmx_type, pid);
 		return true;
 	}
 	if (pdata && PRIV->file)

@@ -190,6 +190,7 @@ class cMpvEngine : public OpenThreads::Thread
 		bool mNoDeinterlace;
 
 		static cMpvEngine *instance;
+		static bool instanceGone; /* shutdown() was called, getInstance() stays NULL */
 		mpv_handle *mpv;
 		bool mQuit;
 

@@ -20,6 +20,7 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+#include <atomic>
 #include <OpenThreads/Thread>
 #include <OpenThreads/Condition>
 
@@ -70,6 +71,7 @@ class hdmi_cec : public OpenThreads::Thread
 		bool autoview_cec_activ;
 		unsigned char deviceType, logicalAddress;
 		int hdmiFd;
+		int wakeFd; /* eventfd, ends the epoll wait of the thread in Stop() */
 		long translateKey(unsigned char code);
 		void handleCode(long code, bool keypressed);
 		int rc_send(int fd, unsigned int code, unsigned int value);
@@ -83,7 +85,7 @@ class hdmi_cec : public OpenThreads::Thread
 		bool tv_off;
 		unsigned char audio_destination;
 	protected:
-		bool running;
+		std::atomic<bool> running;
 	public:
 		~hdmi_cec();
 		static hdmi_cec *getInstance();

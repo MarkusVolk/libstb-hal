@@ -22,15 +22,45 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <time.h>
+#include <unistd.h>
 #include <utime.h>
 
 #define TARGETRES "1280x720"
 
+/* ffmpeg -y -f mjpeg -i <src> -s TARGETRES <dst> </dev/null, without a shell */
+static int convert(const char *src, const char *dst)
+{
+	char *const args[] = { "ffmpeg", "-y", "-f", "mjpeg", "-i", (char *)src, "-s", TARGETRES, (char *)dst, NULL };
+	int status = 0;
+	pid_t pid = fork();
+	if (pid < 0)
+	{
+		fprintf(stderr, "pic2m2v: fork: %m\n");
+		return -1;
+	}
+	if (pid == 0)
+	{
+		int fd = open("/dev/null", O_RDONLY);
+		if (fd >= 0)
+		{
+			dup2(fd, 0);
+			close(fd);
+		}
+		execvp(args[0], args);
+		fprintf(stderr, "pic2m2v: execvp ffmpeg: %m\n");
+		_exit(127);
+	}
+	if (waitpid(pid, &status, 0) < 0)
+		return -1;
+	return status;
+}
+
 int main(int argc, char **argv)
 {
 	char destname[448];
-	char cmd[512];
 	char *p;
 	char *fname;
 	struct stat st, st2;
@@ -50,16 +80,18 @@ int main(int argc, char **argv)
 			fprintf(stderr, "pic2m2v: could not stat '%s' (%m)\n", fname);
 			continue;
 		}
-		strcpy(destname, "/var/cache");
 		/* the cache filename is (example for /share/tuxbox/neutrino/icons/radiomode.jpg):
 		   /var/cache/share.tuxbox.neutrino.icons.radiomode.jpg.m2v
 		   build that filename first...
 		   TODO: this could cause name clashes, use a hashing function instead... */
-		strcat(destname, fname);
+		if (snprintf(destname, sizeof(destname), "/var/cache%s.m2v", fname) >= (int)sizeof(destname))
+		{
+			fprintf(stderr, "pic2m2v: name too long '%s'\n", fname);
+			continue;
+		}
 		p = &destname[strlen("/var/cache/")];
 		while ((p = strchr(p, '/')) != NULL)
 			* p = '.';
-		strcat(destname, ".m2v");
 		/* ...then check if it exists already... */
 		if (stat(destname, &st) || (st.st_mtime != st2.st_mtime) || (st.st_size == 0))
 		{
@@ -68,9 +100,7 @@ int main(int argc, char **argv)
 			u.modtime = st2.st_mtime;
 			printf("converting %s -> %s\n", fname, destname);
 			/* it does not exist or has a different date, so call ffmpeg... */
-			sprintf(cmd, "ffmpeg -y -f mjpeg -i '%s' -s %s '%s' </dev/null",
-				fname, TARGETRES, destname);
-			system(cmd); /* TODO: use libavcodec to directly convert it */
+			convert(fname, destname); /* TODO: use libavcodec to directly convert it */
 			utime(destname, &u);
 		}
 		else

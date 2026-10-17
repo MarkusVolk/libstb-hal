@@ -5,6 +5,7 @@
 #include "init.h"
 #include "glfb.h"
 #include "mpv_player.h"
+#include "dmx_file.h"
 
 #include "hal_debug.h"
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_INIT, NULL, args)
@@ -73,6 +74,7 @@ void hal_api_exit()
 		delete glfb;
 	glfb = NULL;
 	cMpvEngine::shutdown();
+	tsfile_shutdown();
 	initialized = false;
 }
 
