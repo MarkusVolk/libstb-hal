@@ -24,6 +24,8 @@
 #define __glfb_priv__
 #include <stdint.h>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <OpenThreads/Mutex>
 #include <vector>
 #include <map>
@@ -72,11 +74,13 @@ class GLFbPC
 		 * ratio, as a 21:9 TV does with a 16:9 mode */
 		void setOutputFormat(AVRational a, int h, int c, bool stretched = false)
 		{
+			mReInitLock.lock();
 			mOA = a;
 			mScreenAR = stretched ? a : av_make_q(0, 1);
 			*mY = h;
 			mCrop = c;
 			mReInit = true;
+			mReInitLock.unlock();
 		}
 		/* just make everything public for simplicity - this is only used inside libstb-hal anyway
 		private:
@@ -99,12 +103,14 @@ class GLFbPC
 		bool mFullscreen; /* fullscreen? */
 		bool mReInit; /* setup things for GL */
 		OpenThreads::Mutex mReInitLock;
-		bool mShutDown; /* if set main loop is left */
-		bool mInitDone; /* condition predicate */
-		volatile bool mHideReq; /* setHidden(): the window is wanted hidden */
-		bool mHidden; /* the window is hidden */
-		// OpenThreads::Condition mInitCond; /* condition variable for init */
-		// mutable OpenThreads::Mutex mMutex; /* lock our data */
+		std::atomic<bool> mShutDown; /* if set main loop is left */
+		std::atomic<bool> mInitDone; /* condition predicate */
+		std::atomic<bool> mHideReq; /* setHidden(): the window is wanted hidden */
+		std::atomic<bool> mHidden; /* the window is hidden */
+		/* the flags above and the suspend flags change under this mutex, the
+		 * condition tells the waiting thread */
+		std::mutex mStateMutex;
+		std::condition_variable mStateCond;
 
 		std::vector<unsigned char> *osd_buf; /* silly bounce buffer */
 
@@ -158,8 +164,8 @@ class GLFbPC
 		 * hardware that scans DRM PRIME frames itself) */
 		bool mPlaneOK; /* set up: mpv hands its frames to the primary plane */
 		int mRenderFd; /* the render node mpv was given */
-		volatile bool mSuspendReq; /* suspend(): give the display away */
-		volatile bool mSuspended; /* the display is given away */
+		std::atomic<bool> mSuspendReq; /* suspend(): give the display away */
+		std::atomic<bool> mSuspended; /* the display is given away */
 		bool mOnPlane; /* the video that is playing is on the plane */
 		int mDrmFd;
 		struct _drmModeAtomicReq *mPlaneReq; /* mpv adds the plane's properties here */
@@ -213,7 +219,7 @@ class GLFbPC
 		{
 			int width; /* width and height, fixed for a framebuffer instance */
 			int height;
-			bool blit;
+			std::atomic<bool> blit; /* set by any thread, taken by the GL thread */
 			GLuint osdtex; /* holds the OSD texture */
 			GLuint displaytex; /* holds the display texture */
 			GLuint program; /* the GLES2 shader program */

@@ -1,6 +1,7 @@
 #ifndef __VIDEO_LIB_H__
 #define __VIDEO_LIB_H__
 
+#include <atomic>
 #include <OpenThreads/Thread>
 #include <OpenThreads/Mutex>
 #include <vector>
@@ -239,10 +240,11 @@ class cVideo : public OpenThreads::Thread
 		DISPLAY_AR display_aspect;
 		DISPLAY_AR_MODE display_crop;
 		int output_h;
-		int pig_x;
-		int pig_y;
-		int pig_w;
-		int pig_h;
+		/* set by Pig(), read by the GL thread */
+		std::atomic<int> pig_x;
+		std::atomic<int> pig_y;
+		std::atomic<int> pig_w;
+		std::atomic<int> pig_h;
 		bool pig_changed;
 		OpenThreads::Mutex still_m;
 		bool stillpicture;

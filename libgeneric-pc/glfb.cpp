@@ -76,13 +76,17 @@ GLFramebuffer::GLFramebuffer(int x, int y)
 	glfb_priv = new GLFbPC(x, y, osd_buf);
 	si = glfb_priv->getScreenInfo();
 	start();
-	while (!glfb_priv->mInitDone)
-		usleep(1);
+	std::unique_lock<std::mutex> lk(glfb_priv->mStateMutex);
+	glfb_priv->mStateCond.wait(lk, [] { return glfb_priv->mInitDone.load(); });
 }
 
 GLFramebuffer::~GLFramebuffer()
 {
-	glfb_priv->mShutDown = true;
+	{
+		std::lock_guard<std::mutex> lk(glfb_priv->mStateMutex);
+		glfb_priv->mShutDown = true;
+	}
+	glfb_priv->mStateCond.notify_all();
 	glfb_priv->wake();
 	join();
 	delete glfb_priv;
@@ -247,8 +251,10 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	si.transp.length = 8;
 	si.transp.offset = 24;
 
-	unlink("/tmp/neutrino.input");
-	mkfifo("/tmp/neutrino.input", 0600);
+	if (unlink("/tmp/neutrino.input") < 0 && errno != ENOENT)
+		hal_info("%s: could not remove /tmp/neutrino.input: %m\n", __func__);
+	if (mkfifo("/tmp/neutrino.input", 0600) < 0)
+		hal_info("%s: could not create /tmp/neutrino.input FIFO: %m\n", __func__);
 	input_fd = open("/tmp/neutrino.input", O_RDWR | O_CLOEXEC | O_NONBLOCK);
 	if (input_fd < 0)
 		hal_info("%s: could not open /tmp/neutrino.input FIFO: %m\n", __func__);
@@ -477,7 +483,11 @@ void GLFramebuffer::run()
 	int fbmem = (x > 1920 ? x : 1920) * (y > 1080 ? y : 1080) * 4 * 2;
 	osd_buf.resize(fbmem);
 	hal_info("GLFB: OSD buffer set to %d bytes at 0x%p\n", fbmem, osd_buf.data());
-	glfb_priv->mInitDone = true; /* signal that setup is finished */
+	{
+		std::lock_guard<std::mutex> lk(glfb_priv->mStateMutex);
+		glfb_priv->mInitDone = true; /* signal that setup is finished */
+	}
+	glfb_priv->mStateCond.notify_all();
 
 	/* the shutdown joins this thread, so its signal must not land here */
 	sigset_t set;
@@ -492,15 +502,22 @@ void GLFramebuffer::run()
 			/* another program has the display until resume() */
 			glfb_priv->releaseDisplay();
 			hal_info("GLFB: display given away\n");
-			glfb_priv->mSuspended = true;
-			while (glfb_priv->mSuspendReq && !glfb_priv->mShutDown)
-				usleep(20000);
+			{
+				std::unique_lock<std::mutex> lk(glfb_priv->mStateMutex);
+				glfb_priv->mSuspended = true;
+				glfb_priv->mStateCond.notify_all();
+				glfb_priv->mStateCond.wait(lk, [] { return !glfb_priv->mSuspendReq || glfb_priv->mShutDown; });
+			}
 			if (glfb_priv->mShutDown)
 				break;
 			if (!glfb_priv->createDisplay())
 				_exit(1);
 			hal_info("GLFB: display taken back\n");
-			glfb_priv->mSuspended = false;
+			{
+				std::lock_guard<std::mutex> lk(glfb_priv->mStateMutex);
+				glfb_priv->mSuspended = false;
+			}
+			glfb_priv->mStateCond.notify_all();
 			continue;
 		}
 		glfb_priv->pollEvents();
@@ -521,19 +538,20 @@ void GLFramebuffer::suspend()
 {
 	if (glfb_priv->mSuspended)
 		return;
+	std::unique_lock<std::mutex> lk(glfb_priv->mStateMutex);
 	glfb_priv->mSuspendReq = true;
 	glfb_priv->wake();
-	while (!glfb_priv->mSuspended && !glfb_priv->mShutDown)
-		usleep(10000);
+	glfb_priv->mStateCond.wait(lk, [] { return glfb_priv->mSuspended || glfb_priv->mShutDown; });
 }
 
 void GLFramebuffer::resume()
 {
 	if (!glfb_priv->mSuspended)
 		return;
+	std::unique_lock<std::mutex> lk(glfb_priv->mStateMutex);
 	glfb_priv->mSuspendReq = false;
-	while (glfb_priv->mSuspended && !glfb_priv->mShutDown)
-		usleep(10000);
+	glfb_priv->mStateCond.notify_all();
+	glfb_priv->mStateCond.wait(lk, [] { return !glfb_priv->mSuspended || glfb_priv->mShutDown; });
 }
 
 static const char *vertex_shader =
@@ -690,7 +708,7 @@ void GLFbPC::pollEvents()
 	SDL_Event ev;
 	if (mHideReq != mHidden)
 	{
-		mHidden = mHideReq;
+		mHidden = mHideReq.load();
 		if (mHidden)
 			SDL_HideWindow(mWindow);
 		else
@@ -1254,9 +1272,8 @@ void GLFbPC::render()
 			plane_frames = 0;
 			plane_time = plane_max = 0;
 		}
-		if (!mState.blit && !reinit)
+		if (!mState.blit.exchange(false) && !reinit)
 			return;
-		mState.blit = false;
 
 		/* neutrino blits four times a second whether anything has changed
 		 * or not; each swap is a flip of the window's plane, and the video
@@ -1369,10 +1386,9 @@ void GLFbPC::render()
 	}
 	else
 		bltDisplayBuffer(); /* decoded video stream */
-	if (mState.blit)
+	if (mState.blit.exchange(false))
 	{
 		/* only blit manually after fb->blit(), this helps to find missed blit() calls */
-		mState.blit = false;
 		hal_debug("GLFB::%s blit!\n", __func__);
 		bltOSDBuffer(); /* OSD */
 	}
@@ -1633,6 +1649,8 @@ bool GLFbPC::setupPlane(void *params)
 	}
 
 	cMpvEngine *engine = cMpvEngine::getInstance();
+	if (!engine)
+		return false;
 	/* only the overlay interop: the frames are never drawn by the GPU */
 	engine->setString("gpu-hwdec-interop", DRMPRIME_OVERLAY_INTEROP);
 	engine->setString("drm-drmprime-video-plane", "primary");
