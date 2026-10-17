@@ -61,7 +61,7 @@ int eDVBCISession::buildLengthField(unsigned char *pkt, int len)
 		*pkt++ = len;
 		return 2;
 	}
-	else if (len < 65535)
+	else if (len <= 65535)
 	{
 		*pkt++ = 0x82;
 		*pkt++ = len >> 8;
@@ -71,32 +71,49 @@ int eDVBCISession::buildLengthField(unsigned char *pkt, int len)
 	else
 	{
 		printf("[CI SESS] too big length\n");
-		exit(0);
+		return -1;
 	}
 }
 
-int eDVBCISession::parseLengthField(const unsigned char *pkt, int &len)
+/* maxlen: bytes available at pkt (-1: unknown). On error len is set to -1 and 0 is returned */
+int eDVBCISession::parseLengthField(const unsigned char *pkt, int &len, int maxlen)
 {
 	len = 0;
+	if (maxlen == 0)
+	{
+		len = -1;
+		return 0;
+	}
 	if (!(*pkt & 0x80))
 	{
 		len = *pkt;
 		return 1;
 	}
-	for (int i = 0; i < (pkt[0] & 0x7F); ++i)
+	int n = pkt[0] & 0x7F;
+	/* more than 3 length bytes is not valid for CI and would overflow len */
+	if (n > 3 || (maxlen >= 0 && n + 1 > maxlen))
+	{
+		len = -1;
+		return 0;
+	}
+	for (int i = 0; i < n; ++i)
 	{
 		len <<= 8;
 		len |= pkt[i + 1];
 	}
-	return (pkt[0] & 0x7F) + 1;
+	return n + 1;
 }
 
 void eDVBCISession::sendAPDU(const unsigned char *tag, const void *data, int len)
 {
+	if (len < 0)
+		return;
 	unsigned char pkt[len + 3 + 4];
 	int l;
 	memcpy(pkt, tag, 3);
 	l = buildLengthField(pkt + 3, len);
+	if (l < 0)
+		return;
 	if (data)
 		memcpy(pkt + 3 + l, data, len);
 	sendSPDU(0x90, 0, 0, pkt, len + 3 + l);
@@ -112,6 +129,12 @@ void eDVBCISession::sendSPDU(eDVBCISlot *slot, unsigned char tag, const void *da
 	unsigned char pkt[4096];
 	unsigned char *ptr = pkt;
 
+	/* tag + length field (max 3) + data + session_nb + apdu must fit into pkt */
+	if (len < 0 || alen < 0 || (size_t)len + (size_t)alen + 6 > sizeof(pkt))
+	{
+		printf("[CI SESS] sendSPDU: data too big (%d + %d), dropped\n", len, alen);
+		return;
+	}
 	*ptr++ = tag;
 	ptr += buildLengthField(ptr, len + 2);
 	if (data)
@@ -157,7 +180,10 @@ void eDVBCISession::deleteSessions(const eDVBCISlot *slot)
 	for (unsigned short session_nb = 0; session_nb < SLMS; ++session_nb)
 	{
 		if (sessions[session_nb] && sessions[session_nb]->slot == slot)
+		{
+			delete sessions[session_nb];
 			sessions[session_nb] = 0;
+		}
 	}
 }
 
@@ -209,13 +235,14 @@ eDVBCISession *eDVBCISession::createSession(eDVBCISlot *slot, const unsigned cha
 			sessions[session_nb - 1] = new eDVBCIMMISession(slot);
 			printf("[CI SESS] MMI - create session\n");
 			break;
+		case 0x008c1001:
 			if (cCA::GetInstance()->CheckCerts())
 			{
-			case 0x008c1001:
 				printf("[CI SESS] CC MANAGER\n");
 				sessions[session_nb - 1] = new eDVBCIContentControlManagerSession(slot);
 				break;
-			} // fall through
+			}
+			// fall through
 		case 0x00200041:
 			sessions[session_nb - 1] = new eDVBCIHostControlSession(slot);
 			printf("[CI SESS] Host Control\n");
@@ -269,6 +296,7 @@ int eDVBCISession::pollAll()
 			if (sessions[session_nb - 1]->state == stateInDeletion)
 			{
 				sessions[session_nb - 1]->handleClose();
+				delete sessions[session_nb - 1];
 				sessions[session_nb - 1] = 0;
 				r = 1;
 			}
@@ -286,6 +314,11 @@ int eDVBCISession::pollAll()
 
 void eDVBCISession::receiveData(eDVBCISlot *slot, const unsigned char *ptr, size_t len)
 {
+	if (len < 4)
+	{
+		printf("[CI SESS] PROTOCOL: packet too short (%d)\n", (int)len);
+		return;
+	}
 	if ((ptr[0] == 0x90 || ptr[0] == 0x95) && (ptr[3] == 0))
 	{
 		printf("[CI SESS] ****Mist: %02x %02x %02x %02x\n", ptr[0], ptr[1], ptr[2], ptr[3]);
@@ -302,7 +335,12 @@ void eDVBCISession::receiveData(eDVBCISlot *slot, const unsigned char *ptr, size
 #endif
 	printf("\n");
 
-	llen = parseLengthField(pkt, hlen);
+	llen = parseLengthField(pkt, hlen, len - 1);
+	if (hlen < 0 || (size_t)hlen + llen + 1 > len)
+	{
+		printf("[CI SESS] PROTOCOL: invalid header length\n");
+		return;
+	}
 	pkt += llen;
 
 	eDVBCISession *session = NULL;
@@ -311,6 +349,11 @@ void eDVBCISession::receiveData(eDVBCISlot *slot, const unsigned char *ptr, size
 	{
 		unsigned char status;
 
+		if (hlen < 4)
+		{
+			printf("[CI SESS] PROTOCOL: short open session request\n");
+			return;
+		}
 		session = createSession(slot, pkt, status);
 		sendOpenSessionResponse(slot, status, pkt, session ? session->session_nb : 0);
 
@@ -324,6 +367,11 @@ void eDVBCISession::receiveData(eDVBCISlot *slot, const unsigned char *ptr, size
 	{
 		unsigned session_nb;
 		//printf("hlen = %d, %d, %d\n", hlen,  pkt[hlen - 2], pkt[hlen - 1]);
+		if (hlen < 2)
+		{
+			printf("[CI SESS] PROTOCOL: short session header\n");
+			return;
+		}
 		session_nb = pkt[hlen - 2] << 8;
 		session_nb |= pkt[hlen - 1] & 0xFF;
 
@@ -368,11 +416,17 @@ void eDVBCISession::receiveData(eDVBCISlot *slot, const unsigned char *ptr, size
 		{
 			int alen;
 			const unsigned char *stag = pkt;
+			if (len < 3)
+				break;
 			pkt += 3; // tag
 			len -= 3;
-			hlen = parseLengthField(pkt, alen);
+			hlen = parseLengthField(pkt, alen, len);
+			if (alen < 0)
+				break;
 			pkt += hlen;
 			len -= hlen;
+			if ((size_t)alen > len)
+				break;
 
 			//printf("len = %d, hlen = %d, alen = %d\n", len, hlen, alen);
 

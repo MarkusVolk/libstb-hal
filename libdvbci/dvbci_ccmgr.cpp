@@ -65,7 +65,7 @@ static bool get_authdata(uint8_t *host_id, uint8_t *dhsk, uint8_t *akh, unsigned
 	get_authdata_filename(filename, sizeof(filename), slot);
 
 	fd = open(filename, O_RDONLY);
-	if (fd <= 0)
+	if (fd < 0)
 	{
 		fprintf(stderr, "cannot open %s\n", filename);
 		return false;
@@ -442,6 +442,12 @@ static bool element_set(struct cc_ctrl_data *cc_data, unsigned int id, const uin
 
 	free(e->data);
 	e->data = (uint8_t *)malloc(size);
+	if (e->data == NULL)
+	{
+		e->size = 0;
+		e->valid = false;
+		return false;
+	}
 	memcpy(e->data, data, size);
 	e->size = size;
 	e->valid = true;
@@ -486,7 +492,11 @@ static bool element_set_hostid_from_certificate(struct cc_ctrl_data *cc_data, un
 	}
 
 	subject = X509_get_subject_name(cert);
-	X509_NAME_get_text_by_NID(subject, nid_cn, hostid, sizeof(hostid));
+	if (X509_NAME_get_text_by_NID(subject, nid_cn, hostid, sizeof(hostid)) <= 0)
+	{
+		printf("no hostid in certificate\n");
+		return false;
+	}
 
 	if (strlen(hostid) != 16)
 	{
@@ -514,7 +524,8 @@ static bool element_valid(struct cc_ctrl_data *cc_data, unsigned int id)
 	return e && e->valid;
 }
 
-static unsigned int element_get_buf(struct cc_ctrl_data *cc_data, uint8_t *dest, unsigned int id)
+/* dest_size: capacity of dest (ignored when dest is NULL, i.e. size query only) */
+static unsigned int element_get_buf(struct cc_ctrl_data *cc_data, uint8_t *dest, unsigned int dest_size, unsigned int id)
 {
 	struct element *e;
 
@@ -535,14 +546,23 @@ static unsigned int element_get_buf(struct cc_ctrl_data *cc_data, uint8_t *dest,
 	}
 
 	if (dest)
+	{
+		if (e->size > dest_size)
+		{
+			fprintf(stderr, "element_get_buf: datatype %d too big (%u > %u)\n", id, e->size, dest_size);
+			return 0;
+		}
 		memcpy(dest, e->data, e->size);
+	}
 
 	return e->size;
 }
 
-static unsigned int element_get_req(struct cc_ctrl_data *cc_data, uint8_t *dest, unsigned int id)
+static unsigned int element_get_req(struct cc_ctrl_data *cc_data, uint8_t *dest, unsigned int dest_size, unsigned int id)
 {
-	unsigned int len = element_get_buf(cc_data, &dest[3], id);
+	if (dest_size < 3)
+		return 0;
+	unsigned int len = element_get_buf(cc_data, &dest[3], dest_size - 3, id);
 
 	if (len == 0)
 	{
@@ -626,9 +646,9 @@ static void generate_key_seed(struct cc_ctrl_data *cc_data)
 
 	SHA256_Init(&sha);
 	SHA256_Update(&sha, &cc_data->dhsk[240], 16);
-	SHA256_Update(&sha, element_get_ptr(cc_data, 22), element_get_buf(cc_data, NULL, 22));
-	SHA256_Update(&sha, element_get_ptr(cc_data, 20), element_get_buf(cc_data, NULL, 20));
-	SHA256_Update(&sha, element_get_ptr(cc_data, 21), element_get_buf(cc_data, NULL, 21));
+	SHA256_Update(&sha, element_get_ptr(cc_data, 22), element_get_buf(cc_data, NULL, 0, 22));
+	SHA256_Update(&sha, element_get_ptr(cc_data, 20), element_get_buf(cc_data, NULL, 0, 20));
+	SHA256_Update(&sha, element_get_ptr(cc_data, 21), element_get_buf(cc_data, NULL, 0, 21));
 	SHA256_Final(cc_data->ks_host, &sha);
 }
 
@@ -691,7 +711,7 @@ static X509 *import_ci_certificates(struct cc_ctrl_data *cc_data, unsigned int i
 
 	printf("%s -> %s\n", FILENAME, __FUNCTION__);
 
-	len = element_get_buf(cc_data, buf, id);
+	len = element_get_buf(cc_data, buf, sizeof(buf), id);
 
 	cert = certificate_import_and_check(ctx, buf, len);
 	if (!cert)
@@ -723,7 +743,7 @@ static int check_ci_certificates(struct cc_ctrl_data *cc_data)
 	{
 		/* write ci device cert to disk */
 		int fd = open("ci_cert.der", O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR | S_IWUSR);
-		write(fd, element_get_ptr(cc_data, 16), element_get_buf(cc_data, NULL, 16));
+		write(fd, element_get_ptr(cc_data, 16), element_get_buf(cc_data, NULL, 0, 16));
 		close(fd);
 	}
 #endif
@@ -760,8 +780,8 @@ static int generate_akh(struct cc_ctrl_data *cc_data)
 	printf("%s -> %s\n", FILENAME, __FUNCTION__);
 
 	SHA256_Init(&sha);
-	SHA256_Update(&sha, element_get_ptr(cc_data, 6), element_get_buf(cc_data, NULL, 6));
-	SHA256_Update(&sha, element_get_ptr(cc_data, 5), element_get_buf(cc_data, NULL, 5));
+	SHA256_Update(&sha, element_get_ptr(cc_data, 6), element_get_buf(cc_data, NULL, 0, 6));
+	SHA256_Update(&sha, element_get_ptr(cc_data, 5), element_get_buf(cc_data, NULL, 0, 5));
 	SHA256_Update(&sha, cc_data->dhsk, 256);
 	SHA256_Final(akh, &sha);
 
@@ -891,7 +911,7 @@ static int generate_uri_confirm(struct cc_ctrl_data *cc_data, const uint8_t *sak
 
 	/* calculate uri_confirm */
 	SHA256_Init(&sha);
-	SHA256_Update(&sha, element_get_ptr(cc_data, 25), element_get_buf(cc_data, NULL, 25));
+	SHA256_Update(&sha, element_get_ptr(cc_data, 25), element_get_buf(cc_data, NULL, 0, 25));
 	SHA256_Update(&sha, uck, 32);
 	SHA256_Final(uri_confirm, &sha);
 
@@ -920,7 +940,7 @@ static void check_new_key(struct cc_ctrl_data *cc_data)
 		return;
 
 	kp = element_get_ptr(cc_data, 12);
-	element_get_buf(cc_data, &slot, 28);
+	element_get_buf(cc_data, &slot, sizeof(slot), 28);
 
 	AES_set_encrypt_key(s_key, 128, &aes_ctx);
 	for (i = 0; i < 32; i += 16)
@@ -1056,7 +1076,7 @@ static int data_get_loop(struct cc_ctrl_data *cc_data, const unsigned char *data
 	return pos;
 }
 
-static int data_req_loop(struct cc_ctrl_data *cc_data, unsigned char *dest, const unsigned char *data, unsigned int datalen, unsigned int items)
+static int data_req_loop(struct cc_ctrl_data *cc_data, unsigned char *dest, unsigned int dest_size, const unsigned char *data, unsigned int datalen, unsigned int items)
 {
 	int dt_id;
 	unsigned int i;
@@ -1075,7 +1095,7 @@ static int data_req_loop(struct cc_ctrl_data *cc_data, unsigned char *dest, cons
 		printf("req element %d\n", dt_id);
 #endif
 		data_req_handle_new(cc_data, dt_id);    /* check if there is any action needed before we answer */
-		len = element_get_req(cc_data, dest, dt_id);
+		len = element_get_req(cc_data, dest, dest_size - pos, dt_id);
 		if (len == 0)
 		{
 			printf("cannot get element %d\n", dt_id);
@@ -1195,7 +1215,7 @@ bool eDVBCIContentControlManagerSession::ci_ccmgr_cc_data_req(eDVBCISlot *tslot,
 	dest[0] = id_bitmask;
 	dest[1] = dt_nr;
 
-	answ_len = data_req_loop(cc_data, &dest[2], &data[rp], len - rp, dt_nr);
+	answ_len = data_req_loop(cc_data, &dest[2], sizeof(dest) - 2, &data[rp], len - rp, dt_nr);
 	if (answ_len <= 0)
 	{
 		fprintf(stderr, "cannot req data\n");
@@ -1323,7 +1343,7 @@ bool eDVBCIContentControlManagerSession::ci_ccmgr_cc_sac_data_req(eDVBCISlot *ts
 	dest[pos++] = id_bitmask;
 	dest[pos++] = dt_nr;    /* dt_nbr */
 
-	answ_len = data_req_loop(cc_data, &dest[pos], &data[rp], len - rp, dt_nr);
+	answ_len = data_req_loop(cc_data, &dest[pos], sizeof(dest) - pos - 32, &data[rp], len - rp, dt_nr);
 	if (answ_len <= 0)
 	{
 		fprintf(stderr, "cannot req data\n");

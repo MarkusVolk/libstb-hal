@@ -62,19 +62,27 @@ int eDVBCIMMISession::receivedAPDU(const unsigned char *tag, const void *data, i
 			case 0x07: /* menu enq */
 			{
 				MMI_ENQUIRY_INFO *enquiry = (MMI_ENQUIRY_INFO *) malloc(sizeof(MMI_ENQUIRY_INFO));
+				if (!enquiry)
+					break;
 				memset(enquiry, 0, sizeof(MMI_ENQUIRY_INFO));
 				unsigned char *d = (unsigned char *)data;
 				unsigned char *max = ((unsigned char *)d) + len;
 
 				int textlen = len - 2;
 				if ((d + 2) > max)
+				{
+					free(enquiry);
 					break;
+				}
 
 				int blind = *d++ & 1;
 				int alen = *d++;
 				printf("%d bytes text\n", textlen);
 				if ((d + textlen) > max)
+				{
+					free(enquiry);
 					break;
+				}
 
 				char str[textlen + 1];
 				memcpy(str, ((char *)d), textlen);
@@ -83,7 +91,7 @@ int eDVBCIMMISession::receivedAPDU(const unsigned char *tag, const void *data, i
 				enquiry->slot = slot->slot;
 				enquiry->blind = blind;
 				enquiry->answerlen = alen;
-				strcpy(enquiry->enquiryText, str);
+				snprintf(enquiry->enquiryText, sizeof(enquiry->enquiryText), "%s", str);
 
 				/* Send a message to Neutrino cam_menu handler */
 				CA_MESSAGE *pMsg = (CA_MESSAGE *) malloc(sizeof(CA_MESSAGE));
@@ -103,6 +111,8 @@ int eDVBCIMMISession::receivedAPDU(const unsigned char *tag, const void *data, i
 			case 0x0c: /* list last */
 			{
 				MMI_MENU_LIST_INFO *listInfo = (MMI_MENU_LIST_INFO *) malloc(sizeof(MMI_MENU_LIST_INFO));
+				if (!listInfo)
+					break;
 				memset(listInfo, 0, sizeof(MMI_MENU_LIST_INFO));
 
 				listInfo->slot = slot->slot;
@@ -117,8 +127,11 @@ int eDVBCIMMISession::receivedAPDU(const unsigned char *tag, const void *data, i
 				else
 					printf("list_last\n");
 
-				if (d > max)
+				if (d >= max)
+				{
+					free(listInfo);
 					break;
+				}
 
 				int n = *d++;
 
@@ -135,10 +148,10 @@ int eDVBCIMMISession::receivedAPDU(const unsigned char *tag, const void *data, i
 
 					//printf("text tag: %02x %02x %02x\n", d[0], d[1], d[2]);
 					d += 3;
-					d += eDVBCISession::parseLengthField(d, textlen);
+					d += eDVBCISession::parseLengthField(d, textlen, max - d);
 
 					printf("%d bytes text > ", textlen);
-					if ((d + textlen) > max)
+					if (textlen < 0 || (d + textlen) > max)
 						break;
 
 					char str[textlen + 1];
@@ -148,14 +161,16 @@ int eDVBCIMMISession::receivedAPDU(const unsigned char *tag, const void *data, i
 					int type = pos++;
 
 					if (type == 0) /* title */
-						strcpy(listInfo->title, str);
+						snprintf(listInfo->title, sizeof(listInfo->title), "%s", str);
 					else if (type == 1) /* subtitle */
-						strcpy(listInfo->subtitle, str);
+						snprintf(listInfo->subtitle, sizeof(listInfo->subtitle), "%s", str);
 					else if (type == 2) /* bottom */
-						strcpy(listInfo->bottom, str);
+						snprintf(listInfo->bottom, sizeof(listInfo->bottom), "%s", str);
+					else if (listInfo->choice_nb >= MAX_MMI_ITEMS)
+						printf("too many menu items, dropping: ");
 					else /* text */
 					{
-						strcpy(listInfo->choice_item[listInfo->choice_nb], str);
+						snprintf(listInfo->choice_item[listInfo->choice_nb], sizeof(listInfo->choice_item[0]), "%s", str);
 						listInfo->choice_nb++;
 						printf("%d. ", listInfo->choice_nb);
 						//printf("%s\n", listInfo->choice_item[listInfo->choice_nb - 1]);

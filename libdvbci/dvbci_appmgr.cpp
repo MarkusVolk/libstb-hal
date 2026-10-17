@@ -38,6 +38,11 @@ int eDVBCIApplicationManagerSession::receivedAPDU(const unsigned char *tag, cons
 				int dl;
 				printf("[CI AM] application info:\n");
 				printf("[CI AM]   len: %d\n", len);
+				if (len < 6)
+				{
+					printf("[CI AM] warning, application info too short\n");
+					break;
+				}
 				printf("[CI AM]   application_type: %d\n", ((unsigned char *)data)[0]);
 				printf("[CI AM]   application_manufacturer: %02x %02x\n", ((unsigned char *)data)[2], ((unsigned char *)data)[1]);
 				printf("[CI AM]   manufacturer_code: %02x %02x\n", ((unsigned char *)data)[4], ((unsigned char *)data)[3]);

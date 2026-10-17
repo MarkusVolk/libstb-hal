@@ -36,7 +36,7 @@ class eDVBCISession
 		int poll() { if (action) { action = doAction(); return 1; } return 0; }
 		enum { stateInCreation, stateBusy, stateInDeletion, stateStarted, statePrivate};
 
-		static int parseLengthField(const unsigned char *pkt, int &len);
+		static int parseLengthField(const unsigned char *pkt, int &len, int maxlen = -1);
 		static int buildLengthField(unsigned char *pkt, int len);
 
 		static void receiveData(eDVBCISlot *slot, const unsigned char *ptr, size_t len);
