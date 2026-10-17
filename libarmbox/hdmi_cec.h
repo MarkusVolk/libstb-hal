@@ -81,7 +81,7 @@ class hdmi_cec : public OpenThreads::Thread
 		bool tv_off;
 		unsigned char audio_destination;
 	protected:
-		bool running;
+		volatile bool running; /* cleared by Stop(), polled by run() */
 	public:
 		~hdmi_cec();
 		static hdmi_cec *getInstance();

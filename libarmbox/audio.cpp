@@ -77,7 +77,8 @@ void cAudio::openDevice(void)
 	{
 		if ((fd = open(ADEV[devnum], O_RDWR)) < 0)
 			hal_info("openDevice: open failed (%m)\n");
-		fcntl(fd, F_SETFD, FD_CLOEXEC);
+		else
+			fcntl(fd, F_SETFD, FD_CLOEXEC);
 		//do_mute(true, false);
 	}
 	else
@@ -162,10 +163,10 @@ int cAudio::do_mute(bool enable, bool remember)
 	sprintf(str, "%d", Muted);
 	proc_put("/proc/stb/audio/j1_mute", str, strlen(str));
 
-	if (fd < 1)
+	if (fd < 0)
 		openDevice();
 
-	if (fd > 0)
+	if (fd >= 0)
 	{
 		if (ioctl(fd, AUDIO_SET_MUTE, enable) < 0)
 			perror("AUDIO_SET_MUTE");
@@ -207,17 +208,17 @@ int cAudio::setVolume(unsigned int left, unsigned int right)
 	mixer.volume_left = left;
 	mixer.volume_right = right;
 
-	if (fd < 1)
+	if (fd < 0)
 		openDevice();
 
-	if (fd > 0)
+	if (fd >= 0)
 	{
 		if (ioctl(fd, AUDIO_SET_MIXER, &mixer) < 0)
 			perror("AUDIO_SET_MIXER");
 	}
 
-	char str[4];
-	sprintf(str, "%d", v);
+	char str[16];
+	snprintf(str, sizeof(str), "%d", v);
 
 	proc_put("/proc/stb/avs/0/volume", str, strlen(str));
 
@@ -395,6 +396,7 @@ int cAudio::WriteClip(unsigned char *buffer, int size)
 		return -1;
 	}
 #if BOXMODEL_HD51 || BOXMODEL_BRE2ZE4K || BOXMODEL_H7 || BOXMODEL_E4HDULTRA || BOXMODEL_PROTEK4K
+	int written = 0;
 again:
 #endif
 	ret = write(clipfd, buffer, size);
@@ -411,8 +413,15 @@ again:
 			perror("SNDCTL_DSP_RESET");
 		count++;
 		if (count < 3)
+		{
+			/* continue behind the part already written instead of repeating it */
+			written += ret;
+			buffer += ret;
+			size -= ret;
 			goto again;
+		}
 	}
+	ret += written;
 #endif
 	return ret;
 };

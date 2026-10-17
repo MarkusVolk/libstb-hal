@@ -97,7 +97,7 @@ static int dmx_source[NUM_DEMUX] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 static int dmx_source[NUM_DEMUX] = { 0, 0, 0, 0 };
 #endif
 
-char dmxdev[32];
+static char dmxdev[32];
 static char *devname(int adapter, int demux)
 {
 	snprintf(dmxdev, sizeof(dmxdev), "/dev/dvb/adapter%d/demux%d", adapter, demux);
@@ -156,7 +156,7 @@ cDemux::~cDemux()
 	/* wait until Read() has released the mutex */
 	(*P->mutex).lock();
 	(*P->mutex).unlock();
-	free(P->mutex);
+	delete P->mutex;
 	free(pdata);
 	pdata = NULL;
 }
@@ -526,6 +526,9 @@ bool cDemux::pesFilter(const unsigned short _pid)
 				case 1: p_flt.pes_type = DMX_PES_VIDEO1; break;
 				case 2: p_flt.pes_type = DMX_PES_VIDEO2; break;
 				case 3: p_flt.pes_type = DMX_PES_VIDEO3; break;
+				default:
+					hal_info("%s #%d: no DMX_PES_VIDEO type for this demux\n", __FUNCTION__, num);
+					return false;
 			}
 			break;
 		case DMX_AUDIO_CHANNEL:
@@ -535,6 +538,9 @@ bool cDemux::pesFilter(const unsigned short _pid)
 				case 1: p_flt.pes_type = DMX_PES_AUDIO1; break;
 				case 2: p_flt.pes_type = DMX_PES_AUDIO2; break;
 				case 3: p_flt.pes_type = DMX_PES_AUDIO3; break;
+				default:
+					hal_info("%s #%d: no DMX_PES_AUDIO type for this demux\n", __FUNCTION__, num);
+					return false;
 			}
 			break;
 		case DMX_PES_CHANNEL:

@@ -46,7 +46,7 @@
 #define GREEN "\x1B[32m"
 #define NORMAL "\x1B[0m"
 
-#define EPOLL_WAIT_TIMEOUT (-1)
+#define EPOLL_WAIT_TIMEOUT (500) /* ms, lets run() re-check 'running' */
 #define EPOLL_MAX_EVENTS (1)
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_INIT, this, args)
@@ -83,6 +83,7 @@ hdmi_cec::hdmi_cec()
 {
 	standby_cec_activ = autoview_cec_activ = standby = muted = false;
 	hdmiFd = -1;
+	running = false;
 	volume = 0;
 	fallback = false;
 	tv_off = true;
@@ -171,7 +172,7 @@ bool hdmi_cec::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)
 				 */
 				laddrs.cec_version = CEC_OP_CEC_VERSION_2_0;
 				hw_caps_t *_caps = get_hwcaps();
-				strcpy(laddrs.osd_name, _caps->boxname);
+				snprintf(laddrs.osd_name, sizeof(laddrs.osd_name), "%s", _caps->boxname);
 				laddrs.vendor_id = CEC_VENDOR_ID_NONE;
 
 				switch (deviceType)
@@ -315,10 +316,14 @@ void hdmi_cec::SendCECMessage(struct cec_message &txmessage, int sleeptime)
 	if (hdmiFd >= 0)
 	{
 
-		char str[txmessage.length * 6];
-		for (int i = 0; i < txmessage.length; i++)
+		char str[txmessage.length * 6 + 1];
+		str[0] = '\0';
+		if (debuglevel & (1 << HAL_DEBUG_INIT))
 		{
-			sprintf(str + (i * 6), "[0x%02X]", txmessage.data[i]);
+			for (int i = 0; i < txmessage.length; i++)
+			{
+				sprintf(str + (i * 6), "[0x%02X]", txmessage.data[i]);
+			}
 		}
 		hal_info(GREEN "[CEC] send message %s to %s (0x%02X>>0x%02X) '%s' (%s)\n" NORMAL, ToString((cec_logical_address)txmessage.initiator), txmessage.destination == 0xf ? "all" : ToString((cec_logical_address)txmessage.destination), txmessage.initiator, txmessage.destination, ToString((cec_opcode)txmessage.data[0]), str);
 
@@ -578,7 +583,8 @@ bool hdmi_cec::Stop()
 
 	running = false;
 
-	OpenThreads::Thread::cancel();
+	/* run() polls 'running' (epoll timeout), so wait for it before closing the fd it uses */
+	bool ret = (OpenThreads::Thread::join() == 0);
 
 	if (hdmiFd >= 0)
 	{
@@ -586,14 +592,18 @@ bool hdmi_cec::Stop()
 		hdmiFd = -1;
 	}
 
-	return (OpenThreads::Thread::join() == 0);
+	return ret;
 }
 
 void hdmi_cec::run()
 {
-	OpenThreads::Thread::setCancelModeAsynchronous();
 	int n;
 	int epollfd = epoll_create1(0);
+	if (epollfd < 0)
+	{
+		hal_info("[CEC] epoll_create1 failed (%m)\n");
+		return;
+	}
 	struct epoll_event event;
 	event.data.fd = hdmiFd;
 	event.events = EPOLLIN;
@@ -611,6 +621,7 @@ void hdmi_cec::run()
 				Receive(events[i].events);
 		}
 	}
+	close(epollfd);
 }
 
 void hdmi_cec::Receive(int what)
@@ -625,7 +636,7 @@ void hdmi_cec::Receive(int what)
 		if (fallback)
 		{
 			struct cec_msg msg;
-			if (::ioctl(hdmiFd, CEC_RECEIVE, &msg) >= 0)
+			if (::ioctl(hdmiFd, CEC_RECEIVE, &msg) >= 0 && msg.len > 0 && msg.len <= sizeof(msg.msg))
 			{
 				rxmessage.length = msg.len - 1;
 				rxmessage.initiator = cec_msg_initiator(&msg);
@@ -657,10 +668,14 @@ void hdmi_cec::Receive(int what)
 			bool keypressed = false;
 			static unsigned char pressedkey = 0;
 
-			char str[rxmessage.length * 6];
-			for (int i = 0; i < rxmessage.length; i++)
+			char str[rxmessage.length * 6 + 1];
+			str[0] = '\0';
+			if (debuglevel & (1 << HAL_DEBUG_INIT))
 			{
-				sprintf(str + (i * 6), "[0x%02X]", rxmessage.data[i]);
+				for (int i = 0; i < rxmessage.length; i++)
+				{
+					sprintf(str + (i * 6), "[0x%02X]", rxmessage.data[i]);
+				}
 			}
 			hal_info(GREEN "[CEC] received message %s to %s (0x%02X>>0x%02X) '%s' (%s)\n" NORMAL, ToString((cec_logical_address)rxmessage.initiator), rxmessage.destination == 0xf ? "all" : ToString((cec_logical_address)rxmessage.destination), rxmessage.initiator, rxmessage.destination, ToString((cec_opcode)rxmessage.opcode), str);
 

@@ -27,7 +27,7 @@ class cRecord
 		cDemux *dmx;
 		pthread_t record_thread;
 		bool record_thread_running;
-		record_state_t exit_flag;
+		volatile record_state_t exit_flag; /* set by Stop(), read by RecordThread */
 		int state;
 		int bufsize;
 		int bufsize_dmx;

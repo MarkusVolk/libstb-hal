@@ -32,9 +32,16 @@ int proc_get(const char *path, char *value, const int len)
 {
 	int ret, ret2;
 	int pfd = open(path, O_RDONLY);
+	if (len > 0)
+		value[0] = '\0'; /* callers may strcmp() the buffer even on failure */
 	if (pfd < 0)
 		return pfd;
-	ret = read(pfd, value, len);
+	if (len < 1)
+	{
+		close(pfd);
+		return -1;
+	}
+	ret = read(pfd, value, len - 1); /* leave room for the terminator */
 	value[len - 1] = '\0'; /* make sure string is terminated */
 	if (ret >= 0)
 	{
@@ -50,7 +57,8 @@ int proc_get(const char *path, char *value, const int len)
 
 unsigned int proc_get_hex(const char *path)
 {
-	unsigned int n, ret = 0;
+	int n;
+	unsigned int ret = 0;
 	char buf[16];
 	n = proc_get(path, buf, 16);
 	if (n > 0)

@@ -272,7 +272,7 @@ void write_frame(AVFrame *in_frame, int fd)
 		if (codec_context)
 		{
 			init_parameters(in_frame, codec_context);
-			if (avcodec_open2(codec_context, codec, 0) != -1)
+			if (avcodec_open2(codec_context, codec, 0) >= 0)
 			{
 				AVPacket pkt;
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 133, 100)
@@ -284,7 +284,7 @@ void write_frame(AVFrame *in_frame, int fd)
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(57,37,100)
 				int got_output = 0;
 				int ret = avcodec_encode_video2(codec_context, &pkt, in_frame, &got_output);
-				if (ret != -1)
+				if (ret >= 0)
 				{
 #else
 				int ret = avcodec_send_frame(codec_context, in_frame);
@@ -301,22 +301,29 @@ void write_frame(AVFrame *in_frame, int fd)
 					in_frame->pts = i;
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(57,37,100)
 					ret = avcodec_encode_video2(codec_context, &pkt, 0, &got_output);
-					if (ret != -1 && got_output)
+					if (ret >= 0 && got_output)
 					{
 #else
 					ret = avcodec_receive_packet(codec_context, &pkt);
 					if (!ret)
 					{
 #endif
-						if ((pkt.data[3] >> 4) != 0xE)
+						if (pkt.size < 6)
 						{
-							write_all(fd, pes_header, sizeof(pes_header));
+							hal_info_c("%s: encoded packet too short (%d)\n", __func__, pkt.size);
 						}
 						else
 						{
-							pkt.data[4] = pkt.data[5] = 0x00;
+							if ((pkt.data[3] >> 4) != 0xE)
+							{
+								write_all(fd, pes_header, sizeof(pes_header));
+							}
+							else
+							{
+								pkt.data[4] = pkt.data[5] = 0x00;
+							}
+							write_all(fd, pkt.data, pkt.size);
 						}
-						write_all(fd, pkt.data, pkt.size);
 						av_packet_unref(&pkt);
 					}
 				}
@@ -373,7 +380,12 @@ int decode_frame(AVCodecContext *codecContext, AVPacket &packet, int fd)
 				av_frame_free(&frame);
 				return -1;
 			}
-			av_frame_get_buffer(dest_frame, 32);
+			if (av_frame_get_buffer(dest_frame, 32) < 0)
+			{
+				av_frame_free(&dest_frame);
+				av_frame_free(&frame);
+				return -1;
+			}
 			struct SwsContext *convert = NULL;
 			/* validate pixel format before swscale */
 			AVPixelFormat src_fmt = (AVPixelFormat)frame->format;
@@ -383,8 +395,8 @@ int decode_frame(AVCodecContext *codecContext, AVPacket &packet, int fd)
 			{
 				sws_scale(convert, frame->data, frame->linesize, 0, frame->height, dest_frame->data, dest_frame->linesize);
 				sws_freeContext(convert);
+				write_frame(dest_frame, fd);
 			}
-			write_frame(dest_frame, fd);
 			av_frame_free(&dest_frame);
 		}
 		av_frame_free(&frame);
@@ -434,6 +446,7 @@ AVCodecContext *open_codec(AVMediaType mediaType, AVFormatContext *formatContext
 		{
 			if ((avcodec_open2(codecContext, codec, NULL)) != 0)
 			{
+				avcodec_free_context(&codecContext);
 				return NULL;
 			}
 			return codecContext;
@@ -463,7 +476,7 @@ int image_to_mpeg2(const char *image_name, int fd)
 #else
 			get_packet_defaults(&packet);
 #endif
-			if ((ret = av_read_frame(formatContext, &packet)) != -1)
+			if ((ret = av_read_frame(formatContext, &packet)) >= 0)
 			{
 				if ((ret = decode_frame(codecContext, packet, fd)) != 1)
 				{
@@ -1292,7 +1305,7 @@ bool getvideo2(unsigned char *video, int xres, int yres)
 		return ret;
 	}
 	ssize_t r = read(fd_video, video, xres * yres * 3);
-	if (r)
+	if (r > 0)
 	{
 		ret = true;
 	}
