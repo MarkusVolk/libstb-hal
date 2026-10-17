@@ -27,6 +27,15 @@ TUXBOX_BOXTYPE
 
 AC_PROG_CC
 AC_PROG_CXX
+
+dnl common/ and the box libraries are C++11 (OpenThreads, std::to_string);
+dnl libgeneric-pc follows the Meson build and uses gnu++23. An explicit
+dnl -std in CXXFLAGS is left alone.
+AS_CASE([" $CXXFLAGS "],
+	[*" -std="*], [],
+	[AS_IF([test "$BOXTYPE" = "generic"],
+		[CXXFLAGS="$CXXFLAGS -std=gnu++23"],
+		[CXXFLAGS="$CXXFLAGS -std=gnu++11"])])
 PKG_PROG_PKG_CONFIG
 ## both disabled => libtool still defaults to static
 ##                  at least the libtool I tested with ;-)
