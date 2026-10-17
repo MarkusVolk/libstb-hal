@@ -975,11 +975,8 @@ void cVideo::QuadPiP(bool active, int _x, int _y, int _w, int _h)
 		{
 			sprintf(buffer, "%x", 0);
 			proc_put(VMPEG_dst_left[i], buffer, strlen(buffer));
-			sprintf(buffer, "%x", 0);
 			proc_put(VMPEG_dst_top[i], buffer, strlen(buffer));
-			sprintf(buffer, "%x", 0);
 			proc_put(VMPEG_dst_width[i], buffer, strlen(buffer));
-			sprintf(buffer, "%x", 0);
 			proc_put(VMPEG_dst_height[i], buffer, strlen(buffer));
 			sprintf(buffer, "%x", _a);
 			proc_put(VMPEG_dst_apply[i], buffer, strlen(buffer));

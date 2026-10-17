@@ -192,14 +192,13 @@ bool cRecord::ChangePids(unsigned short /*vpid*/, unsigned short *apids, int num
 
 bool cRecord::AddPid(unsigned short pid)
 {
-	std::vector<pes_pids> pids;
 	hal_info("%s: \n", __func__);
 	if (!dmx)
 	{
 		hal_info("%s: DMX = NULL\n", __func__);
 		return false;
 	}
-	pids = dmx->pesfds;
+	const std::vector<pes_pids> &pids = dmx->pesfds;
 	for (std::vector<pes_pids>::const_iterator i = pids.begin(); i != pids.end(); ++i)
 	{
 		if ((*i).pid == pid)

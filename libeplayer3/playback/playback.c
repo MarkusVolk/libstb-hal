@@ -20,6 +20,8 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdint.h>
+#include <pthread.h>
+#include <sys/time.h>
 
 #include "playback.h"
 #include "debug.h"
@@ -44,6 +46,46 @@
 
 static pthread_t supervisorThread;
 static volatile int hasThreadStarted = 0; /* shared with the detached supervisor thread */
+static pthread_mutex_t supervisorMtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t supervisorCond = PTHREAD_COND_INITIALIZER;
+
+static void setThreadStarted(int state)
+{
+	pthread_mutex_lock(&supervisorMtx);
+	hasThreadStarted = state;
+	pthread_cond_broadcast(&supervisorCond);
+	pthread_mutex_unlock(&supervisorMtx);
+}
+
+/* wait up to wait_time * 100 ms until hasThreadStarted leaves 'state' (state < 0: until it is 0);
+ * returns 0 on timeout (the caller's wait_time semantics), wait_time otherwise */
+static int waitThreadStarted(int state, int wait_time)
+{
+	struct timeval now;
+	struct timespec deadline;
+	int busy;
+
+	gettimeofday(&now, NULL);
+	deadline.tv_sec = now.tv_sec + wait_time / 10;
+	deadline.tv_nsec = now.tv_usec * 1000L + (wait_time % 10) * 100000000L;
+	if (deadline.tv_nsec >= 1000000000L)
+	{
+		deadline.tv_sec += 1;
+		deadline.tv_nsec -= 1000000000L;
+	}
+
+	pthread_mutex_lock(&supervisorMtx);
+	while ((busy = (state < 0) ? (hasThreadStarted != 0) : (hasThreadStarted == state)))
+	{
+		if (pthread_cond_timedwait(&supervisorCond, &supervisorMtx, &deadline) == ETIMEDOUT)
+		{
+			busy = (state < 0) ? (hasThreadStarted != 0) : (hasThreadStarted == state);
+			break;
+		}
+	}
+	pthread_mutex_unlock(&supervisorMtx);
+	return busy ? 0 : wait_time;
+}
 
 /* ***************************** */
 /* Prototypes                    */
@@ -113,7 +155,7 @@ bool PlaybackDieNowRegisterCallback(PlaybackDieNowCallback callback)
 
 static void SupervisorThread(Context_t *context)
 {
-	hasThreadStarted = 1;
+	setThreadStarted(1);
 	playback_printf(10, ">\n");
 
 	while (context && context->playback && context->playback->isPlaying && !context->playback->abortRequested)
@@ -122,10 +164,10 @@ static void SupervisorThread(Context_t *context)
 	}
 
 	playback_printf(10, "<\n");
-	hasThreadStarted = 2;
+	setThreadStarted(2);
 	PlaybackTerminate(context);
 	playback_printf(0, "terminating\n");
-	hasThreadStarted = 0;
+	setThreadStarted(0);
 }
 
 /* ***************************** */
@@ -450,11 +492,8 @@ static int32_t PlaybackStop(Context_t *context)
 		ret = cERR_PLAYBACK_ERROR;
 	}
 
-	while ((hasThreadStarted != 0) && (--wait_time) > 0)
-	{
-		playback_printf(10, "Waiting for supervisor thread to terminate itself, will try another %d times\n", wait_time);
-		usleep(100000);
-	}
+	playback_printf(10, "Waiting for supervisor thread to terminate itself (max %d00 ms)\n", wait_time);
+	wait_time = waitThreadStarted(-1, wait_time);
 
 	if (wait_time == 0)
 	{
@@ -509,11 +548,8 @@ static int32_t PlaybackTerminate(Context_t *context)
 		 */
 	}
 
-	while ((hasThreadStarted == 1) && (--wait_time) > 0)
-	{
-		playback_printf(10, "Waiting for supervisor thread to terminate itself, will try another %d times\n", wait_time);
-		usleep(100000);
-	}
+	playback_printf(10, "Waiting for supervisor thread to terminate itself (max %d00 ms)\n", wait_time);
+	wait_time = waitThreadStarted(1, wait_time);
 
 	if (wait_time == 0)
 	{
