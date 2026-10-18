@@ -26,7 +26,6 @@ void *execute_record_thread(void *c)
 
 cRecord::cRecord(int num, int bs_dmx, int bs)
 {
-	hal_info("%s %d\n", __func__, num);
 	dmx = NULL;
 	record_thread_running = false;
 	file_fd = -1;
@@ -37,6 +36,7 @@ cRecord::cRecord(int num, int bs_dmx, int bs)
 	bufsize_dmx = bs_dmx;
 	failureCallback = NULL;
 	failureData = NULL;
+	hal_info("%s %d\n", __func__, num);
 }
 
 cRecord::~cRecord()

@@ -968,7 +968,8 @@ void GLFbPC::sendKey(int code, int value)
 	iev.type = EV_KEY;
 	gettimeofday(&iev.time, NULL);
 	hal_debug("GLFB::%s: 0x%x %d\n", __func__, iev.code, value);
-	write(input_fd, &iev, sizeof(iev));
+	if (write(input_fd, &iev, sizeof(iev)) != sizeof(iev))
+		hal_info("GLFB::%s: write: %m\n", __func__);
 }
 
 void GLFbPC::pushKey(int code)
@@ -980,9 +981,11 @@ void GLFbPC::pushKey(int code)
 	iev.type = EV_KEY;
 	gettimeofday(&iev.time, NULL);
 	hal_debug("GLFB::%s: pushing 0x%x\n", __func__, iev.code);
-	write(input_fd, &iev, sizeof(iev));
+	if (write(input_fd, &iev, sizeof(iev)) != sizeof(iev))
+		hal_info("GLFB::%s: write: %m\n", __func__);
 	iev.value = 0; /* neutrino is stupid, so push key up directly after key down */
-	write(input_fd, &iev, sizeof(iev));
+	if (write(input_fd, &iev, sizeof(iev)) != sizeof(iev))
+		hal_info("GLFB::%s: write: %m\n", __func__);
 }
 
 /* the first repeat of a held gamepad key comes late, the others quickly */

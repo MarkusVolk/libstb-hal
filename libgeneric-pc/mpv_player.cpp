@@ -368,10 +368,11 @@ void cMpvEngine::shutdown()
 }
 
 cMpvEngine::cMpvEngine()
-	: mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
-	  mEof(false), mIdle(true), mLastError(0), mOwner(OWNER_NONE), mLiveSerial(0),
+	: mWantEntry(0), mStartedEntry(0), mLoadedEntry(0),
+	  mOwner(OWNER_NONE), mLiveSerial(0),
 	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveTarget(0.5), mLivePaused(false), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
-	  mWantEntry(0), mStartedEntry(0), mLoadedEntry(0), mTracksValid(false), mTracksGen(0)
+	  mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
+	  mEof(false), mIdle(true), mLastError(0), mTracksValid(false), mTracksGen(0)
 {
 	mStatsTime = 0;
 	mVideo.valid = false;

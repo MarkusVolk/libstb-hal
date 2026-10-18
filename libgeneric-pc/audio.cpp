@@ -507,12 +507,16 @@ void cAudio::run()
 	int obuf_sz = 0; /* in samples */
 	int obuf_sz_max = 0;
 	int o_ch, o_sr; /* output channels and sample rate */
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 37, 100)
 	uint64_t o_layout; /* output channels layout (legacy) */
+#endif
 	char tmp[64] = "unknown";
 	int audio_stream_index = -1;
 	int in_ch = 0;
 	int in_sr = 0;
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(59, 37, 100)
 	uint64_t in_layout = 0;
+#endif
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 37, 100)
 	AVChannelLayout in_chlayout = {};
 	AVChannelLayout o_chlayout = {};
@@ -669,7 +673,6 @@ void cAudio::run()
 					av_channel_layout_copy(&in_chlayout, &p->ch_layout);
 				else
 					av_channel_layout_default(&in_chlayout, in_ch);
-				in_layout = (in_chlayout.order == AV_CHANNEL_ORDER_NATIVE) ? in_chlayout.u.mask : 0;
 #else
 				in_ch = frame->channels ? frame->channels : (c->channels ? c->channels : p->channels);
 				in_layout = frame->channel_layout ? frame->channel_layout : (c->channel_layout ? c->channel_layout : p->channel_layout);
@@ -690,17 +693,19 @@ void cAudio::run()
 				if (in_ch > 2)
 				{
 					o_ch = 2;
-					o_layout = AV_CH_LAYOUT_STEREO;
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 37, 100)
 					o_chlayout = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
+#else
+					o_layout = AV_CH_LAYOUT_STEREO;
 #endif
 				}
 				else
 				{
 					o_ch = in_ch;
-					o_layout = in_layout;
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(59, 37, 100)
 					av_channel_layout_copy(&o_chlayout, &in_chlayout);
+#else
+					o_layout = in_layout;
 #endif
 				}
 				sinkOpen(live_sink, SDL_AUDIO_S16, o_ch, o_sr, 0.2);

@@ -176,7 +176,7 @@ bool hdmi_cec::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)
 				 */
 				laddrs.cec_version = CEC_OP_CEC_VERSION_2_0;
 				hw_caps_t *_caps = get_hwcaps();
-				snprintf(laddrs.osd_name, sizeof(laddrs.osd_name), "%s", _caps->boxname);
+				snprintf(laddrs.osd_name, sizeof(laddrs.osd_name), "%.*s", (int)sizeof(laddrs.osd_name) - 1, _caps->boxname);
 				laddrs.vendor_id = CEC_VENDOR_ID_NONE;
 
 				switch (deviceType)
@@ -344,7 +344,8 @@ void hdmi_cec::SendCECMessage(struct cec_message &txmessage, int sleeptime)
 			message.address = txmessage.destination;
 			message.length = txmessage.length;
 			memcpy(&message.data, txmessage.data, txmessage.length);
-			::write(hdmiFd, &message, 2 + message.length);
+			if (::write(hdmiFd, &message, 2 + message.length) < 0)
+				hal_info("[CEC] write: %m\n");
 		}
 
 		usleep(sleeptime * 1000);
@@ -873,7 +874,8 @@ void hdmi_cec::rc_sync(int fd)
 	ev.type = EV_SYN;
 	ev.code = SYN_REPORT;
 	ev.value = 0;
-	write(fd, &ev, sizeof(ev));
+	if (write(fd, &ev, sizeof(ev)) != sizeof(ev))
+		hal_info("[CEC] %s: write: %m\n", __func__);
 }
 
 void hdmi_cec::send_key(unsigned char key, unsigned char destination)
