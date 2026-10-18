@@ -984,6 +984,28 @@ bool cMpvEngine::setString(const char *name, const std::string &v)
 	return mpv_set_property_string(mpv, name, v.c_str()) >= 0;
 }
 
+/* mpv starts an audio track selected in a stream it cannot seek in where
+ * its read-ahead ends, seconds ahead of the picture, and resets the
+ * playback until both meet again; opening the stream again with that track
+ * loses only the time the open takes */
+bool cMpvEngine::switchAudio(int64_t id)
+{
+	bool seekable = true, network = false;
+	double cached = 0;
+	std::string path;
+	if (getFlag("seekable", seekable) && !seekable
+	    && getFlag("demuxer-via-network", network) && network
+	    && getDouble("demuxer-cache-duration", cached) && cached > 2
+	    && getString("path", path) && !path.empty())
+	{
+		char opt[32];
+		snprintf(opt, sizeof(opt), "aid=%lld", (long long)id);
+		hal_info("%s: %lld, %.1f s read ahead, opening the stream again\n", __func__, (long long)id, cached);
+		return loadFile(path.c_str(), opt);
+	}
+	return setInt("aid", id);
+}
+
 bool cMpvEngine::getFlag(const char *name, bool &v)
 {
 	int f = 0;

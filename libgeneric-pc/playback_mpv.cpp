@@ -226,7 +226,7 @@ bool cPlayback::SetAPid(int pid, bool /*ac3*/)
 		hal_info("%s: no audio track for %d\n", __func__, pid);
 		return false;
 	}
-	return engine->setInt("aid", id);
+	return engine->switchAudio(id);
 }
 
 bool cPlayback::SetSubtitlePid(int pid)

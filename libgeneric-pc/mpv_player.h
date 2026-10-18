@@ -115,6 +115,8 @@ class cMpvEngine : public OpenThreads::Thread
 		 * it to that ratio */
 		void setVideoFit(double panscan, double aspect);
 		bool setString(const char *name, const std::string &v);
+		/* selects audio track id, see there for streams mpv cannot seek in */
+		bool switchAudio(int64_t id);
 		bool getFlag(const char *name, bool &v);
 		void playStats();
 		int64_t mStatsTime;
