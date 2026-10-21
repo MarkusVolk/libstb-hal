@@ -795,6 +795,10 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 	/* track selections are options in mpv and would carry over to the next file */
 	setString("aid", "auto");
 	setString("sid", "auto");
+	/* as are the title, the subtitle charset and a suspended subtitle */
+	setString("edition", "auto");
+	setString("sub-codepage", "auto");
+	setFlag("sub-visibility", true);
 	setStringList(mpv, "http-header-fields", headers);
 	setString("user-agent", userAgent.empty() ? "libmpv" : userAgent);
 	std::vector<std::string> af;
