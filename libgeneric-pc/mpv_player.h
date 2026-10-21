@@ -172,6 +172,7 @@ class cMpvEngine : public OpenThreads::Thread
 		void renderBlock();
 		bool loadFile(const char *url, const char *options, int64_t *entry = NULL);
 
+		OpenThreads::Mutex mLoadLock;
 		OpenThreads::Mutex mRenderLock;
 		int64_t mWantEntry;	/* playlist entry that was asked for last, 0: none */
 		int64_t mStartedEntry;

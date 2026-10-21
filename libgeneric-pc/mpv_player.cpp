@@ -909,9 +909,11 @@ void cMpvEngine::renderEnd()
 	mRenderLock.unlock();
 }
 
-/* "loadfile <url> replace", with the frames of what is replaced locked out */
+/* "loadfile <url> replace", with the frames of what is replaced locked out;
+ * one at a time, so that mWantEntry ends up as the entry loaded last */
 bool cMpvEngine::loadFile(const char *url, const char *options, int64_t *entry_out)
 {
+	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(mLoadLock);
 	tracksChanged();
 	renderBlock();
 	const char *cmd[] = { "loadfile", url, "replace", options ? "-1" : NULL, options, NULL };
