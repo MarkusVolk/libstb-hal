@@ -221,14 +221,16 @@ bool cPlayback::SetAPid(int pid, bool /*ac3*/)
 	hal_info("%s: %d\n", __func__, pid);
 	if (!engine)
 		return false;
-	mAudioStream = pid;
 	int64_t id = trackForPid(engine, "audio", pid);
 	if (id < 0)
 	{
 		hal_info("%s: no audio track for %d\n", __func__, pid);
 		return false;
 	}
-	return engine->switchAudio(id);
+	if (!engine->switchAudio(id))
+		return false;
+	mAudioStream = pid;
+	return true;
 }
 
 bool cPlayback::SetSubtitlePid(int pid)
@@ -531,13 +533,19 @@ bool cPlayback::SelectSubtitles(int pid, std::string charset)
 	hal_info("%s: %d %s\n", __func__, pid, charset.c_str());
 	if (!engine)
 		return false;
-	mSubtitleStream = pid;
 	if (!charset.empty())
 		engine->setString("sub-codepage", charset);
+	bool ok;
 	if (pid < 0)
-		return engine->setString("sid", "no");
-	int64_t id = trackForPid(engine, "sub", pid);
-	return id >= 0 && engine->setInt("sid", id);
+		ok = engine->setString("sid", "no");
+	else
+	{
+		int64_t id = trackForPid(engine, "sub", pid);
+		ok = id >= 0 && engine->setInt("sid", id);
+	}
+	if (ok)
+		mSubtitleStream = pid;
+	return ok;
 }
 
 void cPlayback::RequestAbort(void)
