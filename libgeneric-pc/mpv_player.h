@@ -92,11 +92,14 @@ class cMpvEngine : public OpenThreads::Thread
 
 		mpv_handle *getHandle() { return mpv; }
 
-		/* loads a file or URL paused, blocks until mpv has it open or failed */
+		/* loads a file or URL paused, blocks until mpv has it open or failed;
+		 * an abort() after abortGeneration() returned abort_gen ends it */
 		bool load(const std::string &url, const std::vector<std::string> &headers,
-			  const std::string &userAgent, const std::string &audioFile, double start);
+			  const std::string &userAgent, const std::string &audioFile, double start,
+			  int abort_gen = -1);
 		void stop();
 		void abort();
+		int abortGeneration();
 		bool isLoaded();
 		bool isIdle();
 		bool eofReached();
@@ -203,6 +206,7 @@ class cMpvEngine : public OpenThreads::Thread
 		int64_t mStateLoaded;	/* playlist entries of the last FILE_LOADED and END_FILE */
 		int64_t mStateEnded;
 		bool mAborted;
+		int mAbortGen;
 		bool mEof;
 		bool mIdle;
 		int mLastError;

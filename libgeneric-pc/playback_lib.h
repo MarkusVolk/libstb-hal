@@ -33,6 +33,7 @@ class cPlayback
 		std::string fn_xml;
 		off64_t last_size;
 		int init_jump;
+		int abort_gen;	/* the engine's abort generation at Open() */
 		std::string extractParam(const std::string &hdrs, const std::string &paramName);
 		void parseHeaders(const std::string &headers, std::vector<std::string> &fields, std::string &userAgent);
 		bool Stop(void);

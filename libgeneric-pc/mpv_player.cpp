@@ -379,7 +379,7 @@ cMpvEngine::cMpvEngine()
 	: mWantEntry(0), mStartedEntry(0), mLoadedEntry(0),
 	  mOwner(OWNER_NONE), mLiveSerial(0),
 	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveTarget(0.5), mLivePaused(false), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
-	  mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mStateLoaded(0), mStateEnded(0), mAborted(false),
+	  mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mStateLoaded(0), mStateEnded(0), mAborted(false), mAbortGen(0),
 	  mEof(false), mIdle(true), mLastError(0), mTracksValid(false), mTracksGen(0)
 {
 	mStatsTime = 0;
@@ -778,9 +778,26 @@ static void setStringList(mpv_handle *mpv, const char *name, const std::vector<s
 }
 
 bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &headers,
-		      const std::string &userAgent, const std::string &audioFile, double start)
+		      const std::string &userAgent, const std::string &audioFile, double start,
+		      int abort_gen)
 {
 	hal_info("%s: %s%s\n", __func__, url.c_str(), audioFile.empty() ? "" : " (+audio file)");
+	/* an abort between the caller's Open() and here, e.g. a stop while a
+	 * web channel's URL was being resolved, is not lost: live TV keeps the
+	 * player and nothing is opened */
+	mStateLock.lock();
+	bool aborted_before = abort_gen >= 0 && abort_gen != mAbortGen;
+	if (aborted_before)
+	{
+		mLastError = AVERROR_EXIT;
+		mLastErrorMsg = "aborted";
+	}
+	mStateLock.unlock();
+	if (aborted_before)
+	{
+		hal_info("%s: aborted before the start\n", __func__);
+		return false;
+	}
 	/* a file takes the player away from live TV, a live session that is
 	 * still on its way to mpv is not opened any more */
 	mLiveLock.lock();
@@ -831,7 +848,7 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 	mStateLock.lock();
 	int waited = 0;
 	bool loaded = false, failed = false;
-	while (!mAborted && waited < 600)
+	while (!mAborted && (abort_gen < 0 || abort_gen == mAbortGen) && waited < 600)
 	{
 		loaded = mLoaded && mStateLoaded == entry;
 		failed = mStateEnded == entry;
@@ -840,8 +857,9 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 		mStateCond.wait(&mStateLock, 100);
 		waited++;
 	}
-	bool ok = loaded && !mAborted;
-	if (!loaded && !failed && !mAborted)
+	bool aborted = mAborted || (abort_gen >= 0 && abort_gen != mAbortGen);
+	bool ok = loaded && !aborted;
+	if (!loaded && !failed && !aborted)
 	{
 		mLastError = AVERROR(ETIMEDOUT);
 		mLastErrorMsg = "timeout opening stream";
@@ -914,9 +932,23 @@ bool cMpvEngine::loadFile(const char *url, const char *options, int64_t *entry_o
 	return true;
 }
 
+int cMpvEngine::abortGeneration()
+{
+	mStateLock.lock();
+	int gen = mAbortGen;
+	mStateLock.unlock();
+	return gen;
+}
+
 void cMpvEngine::abort()
 {
 	hal_info("%s\n", __func__);
+	/* counted even while live TV has the player: the load() it is meant
+	 * for may not have taken it yet */
+	mStateLock.lock();
+	mAbortGen++;
+	mStateCond.broadcast();
+	mStateLock.unlock();
 	mLiveLock.lock();
 	bool live = (mOwner == OWNER_LIVE);
 	mLiveLock.unlock();

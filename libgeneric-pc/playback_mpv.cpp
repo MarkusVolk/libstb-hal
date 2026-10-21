@@ -51,6 +51,7 @@ cPlayback::cPlayback(int)
 	pm = PLAYMODE_FILE;
 	last_size = 0;
 	init_jump = -1;
+	abort_gen = -1;
 	trick_active = false;
 	trick_speed = 0;
 	pthread_mutex_init(&trick_lock, NULL);
@@ -73,6 +74,7 @@ bool cPlayback::Open(playmode_t PlayMode)
 	fn_xml = "";
 	last_size = 0;
 	init_jump = -1;
+	abort_gen = engine ? engine->abortGeneration() : 0;
 	return engine != NULL;
 }
 
@@ -191,7 +193,7 @@ bool cPlayback::Start(char *filename, int /*vpid*/, int /*vtype*/, int apid, int
 
 	double start = (init_jump > 0) ? init_jump / 1000.0 : 0;
 	init_jump = -1;
-	playing = engine->load(url, fields, userAgent, filename2, start);
+	playing = engine->load(url, fields, userAgent, filename2, start, abort_gen);
 	first = true;
 	nPlaybackSpeed = 0;
 	if (playing && apid > 0)
