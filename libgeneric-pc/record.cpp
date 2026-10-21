@@ -69,7 +69,13 @@ bool cRecord::Start(int fd, unsigned short vpid, unsigned short *apids, int nump
 	if (!dmx)
 		dmx = new cDemux(dmx_num);
 
-	dmx->Open(DMX_TP_CHANNEL, NULL, bufsize_dmx);
+	if (!dmx->Open(DMX_TP_CHANNEL, NULL, bufsize_dmx))
+	{
+		hal_info("%s: cannot open the demux\n", __func__);
+		delete dmx;
+		dmx = NULL;
+		return false;
+	}
 	dmx->pesFilter(vpid);
 
 	for (i = 0; i < numpids; i++)
