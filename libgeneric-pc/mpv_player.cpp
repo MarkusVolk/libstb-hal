@@ -348,10 +348,18 @@ cMpvEngine *cMpvEngine::getInstance()
 	OpenThreads::ScopedLock<OpenThreads::Mutex> lock(instanceLock);
 	if (!instance && !instanceGone)
 	{
+		/* tried once: the GL thread asks for every frame, and HAL_NOMPV
+		 * means no player for anyone */
+		if (getenv("HAL_NOMPV"))
+		{
+			instanceGone = true;
+			return NULL;
+		}
 		cMpvEngine *e = new cMpvEngine();
 		if (!e->mpv)
 		{
 			delete e;
+			instanceGone = true;
 			return NULL;
 		}
 		instance = e;
