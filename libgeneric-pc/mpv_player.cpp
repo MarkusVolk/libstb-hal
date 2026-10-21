@@ -1479,11 +1479,18 @@ void cMpvEngine::liveClock(double buffered)
 	if (speed > old - 0.0005 && speed < old + 0.0005)
 		return;
 
+	/* under the lock with the owner checked again: a load() that took the
+	 * player meanwhile sets 1.0 after this, not before */
 	mLiveLock.lock();
+	if (mOwner != OWNER_LIVE || mLivePaused)
+	{
+		mLiveLock.unlock();
+		return;
+	}
 	mLiveSpeed = speed;
-	mLiveLock.unlock();
 	hal_debug("%s: %.2f s buffered, speed %.4f\n", __func__, buffered, speed);
 	mpv_set_property_async(mpv, 0, "speed", MPV_FORMAT_DOUBLE, &speed);
+	mLiveLock.unlock();
 }
 
 /* one line when a live session has its first picture or sound: what plays, and how */
