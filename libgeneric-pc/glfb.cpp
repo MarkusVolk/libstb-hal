@@ -367,6 +367,20 @@ void GLFbPC::initKeys()
 	mKeyMap['W'] = KEY_WWW;
 }
 
+/* the time of day in the fields the kernel headers give input_event; with
+ * 64-bit time_t on 32-bit targets there is no time member any more */
+static void stampInputEvent(struct input_event &ev)
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+#ifdef input_event_sec
+	ev.input_event_sec = tv.tv_sec;
+	ev.input_event_usec = tv.tv_usec;
+#else
+	ev.time = tv;
+#endif
+}
+
 /* the window, the GL context and what draws into it; called again after the display was given away */
 bool GLFbPC::createDisplay()
 {
@@ -966,7 +980,7 @@ void GLFbPC::sendKey(int code, int value)
 	iev.code = code;
 	iev.value = value;
 	iev.type = EV_KEY;
-	gettimeofday(&iev.time, NULL);
+	stampInputEvent(iev);
 	hal_debug("GLFB::%s: 0x%x %d\n", __func__, iev.code, value);
 	if (write(input_fd, &iev, sizeof(iev)) != sizeof(iev))
 		hal_info("GLFB::%s: write: %m\n", __func__);
@@ -979,7 +993,7 @@ void GLFbPC::pushKey(int code)
 	iev.code = code;
 	iev.value = 1; /* key down */
 	iev.type = EV_KEY;
-	gettimeofday(&iev.time, NULL);
+	stampInputEvent(iev);
 	hal_debug("GLFB::%s: pushing 0x%x\n", __func__, iev.code);
 	if (write(input_fd, &iev, sizeof(iev)) != sizeof(iev))
 		hal_info("GLFB::%s: write: %m\n", __func__);
