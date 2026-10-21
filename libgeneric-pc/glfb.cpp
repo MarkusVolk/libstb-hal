@@ -1243,6 +1243,13 @@ void GLFbPC::render()
 		mPlaneRedraw = true;
 		hal_info("GLFB::%s: the video is %s\n", __func__, on_plane ? "on the plane below the window" : "drawn in the window");
 	}
+	/* the margins of the picture in the menus are mpv options and stay;
+	 * drawn in the window, the GL quad does the positioning alone */
+	if (!on_plane && engine && (mMargins[0] != 0 || mMargins[1] != 0 || mMargins[2] != 0 || mMargins[3] != 0))
+	{
+		mMargins[0] = mMargins[1] = mMargins[2] = mMargins[3] = 0;
+		engine->setVideoMargins(0, 0, 0, 0);
+	}
 	if (on_plane)
 	{
 		static uint64_t plane_since, plane_time, plane_max;
