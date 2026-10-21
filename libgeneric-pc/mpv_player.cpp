@@ -53,7 +53,9 @@ void hal_live_pids(uint16_t &vpid, uint16_t &apid, uint16_t &pcrpid);
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYER, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_PLAYER, this, args)
 
+#ifndef NEUTRINO_MPV_CONF
 #define NEUTRINO_MPV_CONF "/etc/neutrino/mpv.conf"
+#endif
 
 cMpvEngine *cMpvEngine::instance = NULL;
 bool cMpvEngine::instanceGone = false;
