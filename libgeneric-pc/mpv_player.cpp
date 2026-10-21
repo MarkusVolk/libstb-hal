@@ -371,7 +371,7 @@ cMpvEngine::cMpvEngine()
 	: mWantEntry(0), mStartedEntry(0), mLoadedEntry(0),
 	  mOwner(OWNER_NONE), mLiveSerial(0),
 	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveTarget(0.5), mLivePaused(false), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
-	  mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mAborted(false),
+	  mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mStateLoaded(0), mStateEnded(0), mAborted(false),
 	  mEof(false), mIdle(true), mLastError(0), mTracksValid(false), mTracksGen(0)
 {
 	mStatsTime = 0;
@@ -478,15 +478,19 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 			mStateLock.unlock();
 			break;
 		case MPV_EVENT_FILE_LOADED:
+		{
 			hal_debug("%s: file loaded\n", __func__);
 			mRenderLock.lock();
 			mLoadedEntry = mStartedEntry;
+			int64_t loaded = mLoadedEntry;
 			mRenderLock.unlock();
 			mStateLock.lock();
 			mLoaded = true;
+			mStateLoaded = loaded;
 			mStateCond.broadcast();
 			mStateLock.unlock();
 			break;
+		}
 		case MPV_EVENT_END_FILE:
 			handleEndFile((mpv_event_end_file *)ev->data);
 			break;
@@ -552,6 +556,7 @@ void cMpvEngine::handleEndFile(mpv_event_end_file *ef)
 {
 	mStateLock.lock();
 	mLoaded = false;
+	mStateEnded = ef->playlist_entry_id;
 	switch (ef->reason)
 	{
 		case MPV_END_FILE_REASON_EOF:
@@ -805,18 +810,26 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 	else
 		setString("start", "none");
 
-	if (!loadFile(url.c_str(), NULL))
+	int64_t entry = 0;
+	if (!loadFile(url.c_str(), NULL, &entry))
 		return false;
 
+	/* only the events of this entry count: the end or the loaded state of
+	 * the entry it replaces (often a live session) may still be queued */
 	mStateLock.lock();
 	int waited = 0;
-	while (!mLoaded && !mFailed && !mAborted && waited < 600)
+	bool loaded = false, failed = false;
+	while (!mAborted && waited < 600)
 	{
+		loaded = mLoaded && mStateLoaded == entry;
+		failed = mStateEnded == entry;
+		if (loaded || failed)
+			break;
 		mStateCond.wait(&mStateLock, 100);
 		waited++;
 	}
-	bool ok = mLoaded && !mAborted;
-	if (!mLoaded && !mFailed && !mAborted)
+	bool ok = loaded && !mAborted;
+	if (!loaded && !failed && !mAborted)
 	{
 		mLastError = AVERROR(ETIMEDOUT);
 		mLastErrorMsg = "timeout opening stream";
@@ -867,7 +880,7 @@ void cMpvEngine::renderEnd()
 }
 
 /* "loadfile <url> replace", with the frames of what is replaced locked out */
-bool cMpvEngine::loadFile(const char *url, const char *options)
+bool cMpvEngine::loadFile(const char *url, const char *options, int64_t *entry_out)
 {
 	tracksChanged();
 	renderBlock();
@@ -884,6 +897,8 @@ bool cMpvEngine::loadFile(const char *url, const char *options)
 	mRenderLock.lock();
 	mWantEntry = entry;
 	mRenderLock.unlock();
+	if (entry_out)
+		*entry_out = entry;
 	return true;
 }
 

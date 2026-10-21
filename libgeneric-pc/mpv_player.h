@@ -167,7 +167,7 @@ class cMpvEngine : public OpenThreads::Thread
 		void liveStart(const LiveParams &p);
 		void liveStop();
 		void renderBlock();
-		bool loadFile(const char *url, const char *options);
+		bool loadFile(const char *url, const char *options, int64_t *entry = NULL);
 
 		OpenThreads::Mutex mRenderLock;
 		int64_t mWantEntry;	/* playlist entry that was asked for last, 0: none */
@@ -200,6 +200,8 @@ class cMpvEngine : public OpenThreads::Thread
 		OpenThreads::Condition mStateCond;
 		bool mLoaded;
 		bool mFailed;
+		int64_t mStateLoaded;	/* playlist entries of the last FILE_LOADED and END_FILE */
+		int64_t mStateEnded;
 		bool mAborted;
 		bool mEof;
 		bool mIdle;
