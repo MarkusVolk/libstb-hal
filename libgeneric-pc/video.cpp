@@ -183,9 +183,12 @@ int cVideo::getAspectRatio(void)
 		vp.valid = false;
 		if (engine)
 			vp = engine->getVideoParams();
-		if (!vp.valid || vp.aspect <= 0)
+		/* the stream's own aspect: "aspect" has the override the GL
+		 * thread sets for the picture in the menus, the 4:3 modes and
+		 * stretching screens */
+		if (!vp.valid || vp.dar <= 0)
 			goto out;
-		ar = (int)(vp.aspect * 100);
+		ar = (int)(vp.dar * 100);
 	}
 	else
 	{
