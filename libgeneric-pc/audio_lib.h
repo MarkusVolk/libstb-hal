@@ -51,12 +51,12 @@ class cAudio : public OpenThreads::Thread
 		int mixer_fd; /* if we are using the OSS mixer */
 		int mixer_num; /* oss mixer to use, if any */
 
-		int StreamType;
+		int StreamType = 0;
 		AUDIO_SYNC_MODE SyncMode;
 		bool started;
 		bool thread_started;
 
-		int volume;
+		int volume = 100;
 		int64_t curr_pts;
 
 		void openDevice(void);
