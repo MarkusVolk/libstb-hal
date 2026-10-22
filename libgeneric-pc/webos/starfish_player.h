@@ -20,6 +20,7 @@ struct AVFormatContext;
 struct AVIOContext;
 struct AVPacket;
 struct AVStream;
+struct AVBSFContext;
 class StarfishMediaAPIs;
 
 /* ffmpeg demuxes, the TV decodes: the elementary streams go into one
@@ -74,6 +75,8 @@ class cStarfishPlayer : public cHwPlayer
 		bool isJump(int64_t ns, int es) const;
 		void smoothJumps(AVPacket *pkt, int es);
 		void fillTime(AVPacket *pkt, int es);
+		bool openAnnexB();
+		void queueVideo(AVPacket *pkt, std::vector<AVPacket *> *preroll);
 		AVStream *audioStream() const;
 		int openInput(AVFormatContext *&fmt, const std::string &url, const std::string &userAgent,
 			      const std::vector<std::string> &headerFields);
@@ -120,6 +123,8 @@ class cStarfishPlayer : public cHwPlayer
 		int mAudioIdx;                  /* in mAudioFmt where there is one */
 		std::atomic<bool> mAudioSeekReq;
 		bool mAdts;
+		bool mNeedAnnexB;               /* the video is avcC/hvcC, as in mp4 or mkv */
+		AVBSFContext *mBsf;             /* turns it into annex B */
 
 		StarfishMediaAPIs *mApi;
 		std::mutex mEventLock;

@@ -25,6 +25,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavutil/dict.h>
 #include <libavutil/mathematics.h>
@@ -74,7 +75,7 @@ cStarfishPlayer::cStarfishPlayer()
 	  mFramePts(AV_NOPTS_VALUE), mDemuxPts(AV_NOPTS_VALUE), mBytes(0), mDropped(0),
 	  mStartPts(0), mFileStart(0), mTimeSet(false), mSeekReq(false), mSeekTarget(0), mFlushing(false), mWaitKey(false), mTsOffset(0), mTsPrevOffset(0),
 	  mFd(-1), mIo(NULL), mFmt(NULL), mAudioFmt(NULL), mVideoIdx(-1), mAudioIdx(-1), mAudioSeekReq(false),
-	  mAdts(false), mApi(NULL), mLoadDone(false), mUnloadDone(false)
+	  mAdts(false), mNeedAnnexB(false), mBsf(NULL), mApi(NULL), mLoadDone(false), mUnloadDone(false)
 {
 }
 
@@ -183,6 +184,57 @@ void cStarfishPlayer::fillTime(AVPacket *pkt, int es)
 	mNoPts[es]++;
 }
 
+bool cStarfishPlayer::openAnnexB()
+{
+	AVStream *vs = mFmt->streams[mVideoIdx];
+	const AVBitStreamFilter *f = av_bsf_get_by_name(vs->codecpar->codec_id == AV_CODEC_ID_HEVC ? "hevc_mp4toannexb" : "h264_mp4toannexb");
+	if (!f || av_bsf_alloc(f, &mBsf) < 0)
+		return false;
+	avcodec_parameters_copy(mBsf->par_in, vs->codecpar);
+	mBsf->time_base_in = vs->time_base;
+	if (av_bsf_init(mBsf) < 0)
+	{
+		av_bsf_free(&mBsf);
+		return false;
+	}
+	return true;
+}
+
+/* a video packet on its way to the queue, in annex B where it was not */
+void cStarfishPlayer::queueVideo(AVPacket *pkt, std::vector<AVPacket *> *preroll)
+{
+	if (!mBsf)
+	{
+		if (preroll)
+			preroll->push_back(av_packet_clone(pkt));
+		else
+			push(mVideoQ, av_packet_clone(pkt));
+		return;
+	}
+	AVRational tb = pkt->time_base;
+	AVPacket *in = av_packet_clone(pkt);
+	if (av_bsf_send_packet(mBsf, in) < 0)
+	{
+		av_packet_free(&in);
+		return;
+	}
+	av_packet_free(&in);
+	for (;;)
+	{
+		AVPacket *out = av_packet_alloc();
+		if (av_bsf_receive_packet(mBsf, out) < 0)
+		{
+			av_packet_free(&out);
+			break;
+		}
+		out->time_base = tb;
+		if (preroll)
+			preroll->push_back(out);
+		else
+			push(mVideoQ, out);
+	}
+}
+
 bool cStarfishPlayer::isJump(int64_t ns, int es) const
 {
 	int64_t last = mLastDts[es];
@@ -273,12 +325,8 @@ bool cStarfishPlayer::supported(std::string &videoCodec, std::string &audioCodec
 			hal_info("%s: video %s\n", __func__, avcodec_get_name(v->codec_id));
 			return false;
 	}
-	/* avcC/hvcC as in mp4 or mkv would have to become annex B first */
-	if (v->extradata_size > 0 && v->extradata[0] == 1)
-	{
-		hal_info("%s: %s is not annex B\n", __func__, videoCodec.c_str());
-		return false;
-	}
+	/* avcC/hvcC as in mp4 or mkv: the TV takes annex B only */
+	mNeedAnnexB = v->extradata_size > 0 && v->extradata[0] == 1;
 	if (v->width <= 0 || v->height <= 0)
 	{
 		hal_info("%s: video size unknown\n", __func__);
@@ -349,7 +397,10 @@ bool cStarfishPlayer::preroll(int &error)
 				mAdts = pkt->size > 2 && pkt->data[0] == 0xff && (pkt->data[1] & 0xf0) == 0xf0;
 			}
 			mBytes += pkt->size;
-			mPreroll.push_back(av_packet_clone(pkt));
+			if (pkt->stream_index == mVideoIdx)
+				queueVideo(pkt, &mPreroll);
+			else
+				mPreroll.push_back(av_packet_clone(pkt));
 		}
 		av_packet_unref(pkt);
 	}
@@ -579,6 +630,12 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 		mFmt->streams[i]->discard = ((int)i == mVideoIdx || (!mAudioFmt && (int)i == mAudioIdx)) ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
 	for (unsigned i = 0; mAudioFmt && i < mAudioFmt->nb_streams; i++)
 		mAudioFmt->streams[i]->discard = (int)i == mAudioIdx ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+	if (mNeedAnnexB && !openAnnexB())
+	{
+		hal_info("%s: no annex B filter for %s\n", __func__, videoCodec.c_str());
+		stop();
+		return UNSUPPORTED;
+	}
 
 	mFileStart = mFmt->start_time != AV_NOPTS_VALUE ? av_rescale(mFmt->start_time, 1000, 1) : 0;
 	if (startMs > 0)
@@ -651,6 +708,8 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 		 audioCodec.empty() ? "" : ", ", audioCodec.c_str(), mStartPts / 1e9);
 	if (mAudioFmt)
 		hal_info("%s: the sound from a stream of its own\n", __func__);
+	if (mBsf)
+		hal_info("%s: the video made annex B\n", __func__);
 	return OK;
 }
 
@@ -701,6 +760,9 @@ void cStarfishPlayer::stop()
 			av_packet_free(&pkt);
 		v->clear();
 	}
+	if (mBsf)
+		av_bsf_free(&mBsf);
+	mNeedAnnexB = false;
 	if (mFmt)
 		avformat_close_input(&mFmt);
 	if (mAudioFmt)
@@ -820,6 +882,8 @@ void cStarfishPlayer::doSeek()
 	mSeekReq = false;
 	mFlushing = true;
 	emptyQueues();
+	if (mBsf)
+		av_bsf_flush(mBsf);
 	{
 		std::lock_guard<std::mutex> v(mFeedLock[1]), a(mFeedLock[2]);
 		try
@@ -924,7 +988,10 @@ void cStarfishPlayer::demuxLoop()
 			if (pts != AV_NOPTS_VALUE)
 				mDemuxPts = pts;
 			mBytes += pkt->size;
-			push(pkt->stream_index == mVideoIdx ? mVideoQ : mAudioQ, av_packet_clone(pkt));
+			if (pkt->stream_index == mVideoIdx)
+				queueVideo(pkt, NULL);
+			else
+				push(mAudioQ, av_packet_clone(pkt));
 		}
 		av_packet_unref(pkt);
 	}
