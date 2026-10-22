@@ -15,5 +15,10 @@
  * have been created with the custom Wayland surface role */
 bool glfb_webos_attach(SDL_Window *window, const char *appid);
 void glfb_webos_release();
+/* the exported window the TV's media pipeline draws into, NULL without one */
+const char *glfb_webos_window_id();
+/* where the video of the pipeline goes in the window, in window pixels;
+ * w or h 0 is the whole window */
+void glfb_webos_set_video_rect(int videoW, int videoH, int x, int y, int w, int h);
 
 #endif

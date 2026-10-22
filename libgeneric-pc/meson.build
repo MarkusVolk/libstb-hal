@@ -1,5 +1,6 @@
 generic_sources = []
 generic_deps = []
+generic_objects = []
 generic_args = ['-D__STDC_FORMAT_MACROS', '-D__STDC_CONSTANT_MACROS', '-Wfatal-errors']
 generic_inc = [config_inc, hal_inc, include_directories('../common')]
 generic_common_deps = [
@@ -22,7 +23,7 @@ if get_option('webos').enabled()
 		error('webos needs -Dwebos_protocols, the directory of webos-wayland-extensions')
 	endif
 	wayland_scanner = find_program('wayland-scanner', native : true)
-	foreach proto : ['webos-shell']
+	foreach proto : ['webos-shell', 'webos-foreign']
 		xml = webos_protocols / proto + '.xml'
 		generic_sources += custom_target(proto + '-header',
 			input : xml,
@@ -36,7 +37,17 @@ if get_option('webos').enabled()
 		)
 	endforeach
 	generic_sources += ['webos/platform_webos.cpp', 'webos/glfb_webos.cpp', 'webos/webos_app.cpp', 'webos/webos_input.cpp', 'webos/webos_request.cpp']
-	generic_deps += dependency('wayland-client')
+	generic_deps += [dependency('wayland-client'), dependency('libplayerAPIs')]
+	# LG's media library reports failures as C++ exceptions
+	starfish = static_library('starfish',
+		'webos/starfish_player.cpp',
+		cpp_args : generic_args,
+		include_directories : generic_inc,
+		dependencies : generic_common_deps + generic_deps,
+		override_options : ['cpp_eh=default'],
+		pic : true,
+	)
+	generic_objects += starfish.extract_all_objects(recursive : false)
 else
 	generic_sources += 'platform.cpp'
 endif
@@ -58,6 +69,7 @@ libgeneric = static_library('generic',
 	cpp_args : generic_args,
 	include_directories : generic_inc,
 	dependencies : generic_common_deps + generic_deps,
+	objects : generic_objects,
 	pic : true,
 )
 

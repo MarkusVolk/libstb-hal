@@ -9,6 +9,7 @@
 
 #include "platform.h"
 #include "glfb_webos.h"
+#include "starfish_player.h"
 #include "webos_input.h"
 #include "webos_request.h"
 #include "hal_debug.h"
@@ -79,5 +80,5 @@ bool platform_standby(bool on)
 
 cHwPlayer *platform_player()
 {
-	return NULL;
+	return new cStarfishPlayer();
 }
