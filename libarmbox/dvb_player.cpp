@@ -175,7 +175,7 @@ int streamTypeFor(enum AVCodecID id)
 
 cDvbPlayer::cDvbPlayer()
 	: mAbort(false), mStop(false), mPlaying(false), mEof(false), mPaused(false), mTrick(false),
-	  mBytes(0), mSeekReq(false), mSeekTarget(0), mGrowing(false), mDemuxDone(false), mFd(-1),
+	  mBytes(0), mSeekReq(false), mSeekTarget(0), mGrowing(false), mFollow(false), mDemuxDone(false), mFd(-1),
 	  mIo(NULL), mFmt(NULL), mVideoIdx(-1), mAudioIdx(-1), mAudioId(-1), mWantAudio(-1),
 	  mVideoType(-1), mAudioType(-1), mAdts(false), mSpsSeen(false), mStart90(0),
 	  mVideoFd(-1), mAudioFd(-1), mVideoFlags(0), mAudioFlags(0), mGen(0), mVideoGen(0), mAudioGen(0)
@@ -217,8 +217,9 @@ int cDvbPlayer::ioRead(void *opaque, uint8_t *buf, int size)
 			return (int)n;
 		if (n < 0 && errno != EINTR)
 			return AVERROR(errno);
-		/* the end of a recording that is still written: wait for it to grow */
-		if (!p->mGrowing || p->mAbort || p->mStop || p->mSeekReq || waited >= GROW_WAIT_MS)
+		/* the end of a recording that is still written: wait for it to grow,
+		 * while it plays; a seek reads up to the end and goes on */
+		if (!p->mGrowing || !p->mFollow || p->mAbort || p->mStop || p->mSeekReq || waited >= GROW_WAIT_MS)
 			return AVERROR_EOF;
 		usleep(50000);
 		waited += 50;
@@ -530,7 +531,9 @@ void cDvbPlayer::doSeek()
 	int64_t target = mSeekTarget;
 	mSeekReq = false;
 	int64_t start = mFmt->start_time != AV_NOPTS_VALUE ? mFmt->start_time : 0;
+	mFollow = false;
 	int ret = av_seek_frame(mFmt, -1, start + target * 1000, AVSEEK_FLAG_BACKWARD);
+	mFollow = true;
 	hal_info("%s: to %lld ms%s\n", __func__, (long long)target, ret < 0 ? ", failed" : "");
 	if (ret < 0)
 		return;
@@ -653,6 +656,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 	mSpsSeen = false;
 	mBytes = 0;
 	mGrowing = growing;
+	mFollow = false;
 	error = 0;
 
 	int ret = openInput(url, userAgent, headerFields);
@@ -695,6 +699,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 	uint64_t livePts = videoDecoder->GetPTS();
 	setupDecoders();
 	mVideoGen = mAudioGen = mGen;
+	mFollow = true;
 	mDemuxThread = std::thread(&cDvbPlayer::demuxLoop, this);
 	mVideoThread = std::thread(&cDvbPlayer::writeLoop, this, mVideoFd, std::ref(mVideoQ), std::ref(mVideoGen));
 	if (mAudioIdx >= 0)

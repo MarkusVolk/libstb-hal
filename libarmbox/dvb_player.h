@@ -89,6 +89,7 @@ class cDvbPlayer : public cHwPlayer
 		std::atomic<bool> mSeekReq;
 		std::atomic<int64_t> mSeekTarget; /* ms, absolute */
 		bool mGrowing;
+		std::atomic<bool> mFollow;       /* wait at the end of a growing recording */
 		bool mDemuxDone;
 		int mFd;                          /* a local file, read through mIo */
 		AVIOContext *mIo;
