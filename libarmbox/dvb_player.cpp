@@ -175,7 +175,7 @@ int streamTypeFor(enum AVCodecID id)
 
 cDvbPlayer::cDvbPlayer()
 	: mAbort(false), mStop(false), mPlaying(false), mEof(false), mPaused(false), mTrick(false),
-	  mBytes(0), mSeekReq(false), mSeekTarget(0), mGrowing(false), mFollow(false), mDemuxDone(false), mFd(-1),
+	  mBytes(0), mSeekReq(false), mSeekTarget(0), mGrowing(false), mFollow(false), mDemuxDone(false), mAudioFrom(-1), mFd(-1),
 	  mIo(NULL), mFmt(NULL), mVideoIdx(-1), mAudioIdx(-1), mAudioId(-1), mWantAudio(-1),
 	  mVideoType(-1), mAudioType(-1), mAdts(false), mSpsSeen(false), mStart90(0),
 	  mVideoFd(-1), mAudioFd(-1), mVideoFlags(0), mAudioFlags(0), mGen(0), mVideoGen(0), mAudioGen(0)
@@ -540,6 +540,7 @@ void cDvbPlayer::doSeek()
 	flush();
 	mSpsSeen = false;
 	mDemuxDone = false;
+	mAudioFrom = -1;
 	mEof = false;
 }
 
@@ -606,6 +607,15 @@ void cDvbPlayer::demuxLoop()
 		}
 		else if (pkt->stream_index == mAudioIdx && !waitKey && !mTrick)
 		{
+			/* the sound begins at the picture to go on from; the decoder
+			 * keeps the picture in time with it and drops what is before */
+			int64_t apts = pts90(pkt, mFmt->streams[mAudioIdx]);
+			if (mAudioFrom >= 0 && apts >= 0 && ((mAudioFrom - apts) & 0x1ffffffffLL) < (1LL << 32))
+			{
+				av_packet_unref(pkt);
+				continue;
+			}
+			mAudioFrom = -1;
 			if (audioPes(pkt, pes))
 				push(mAudioQ, pes);
 		}
@@ -630,13 +640,14 @@ uint64_t cDvbPlayer::pts()
 	return pts ? (pts - mStart90) & 0x1ffffffffLL : 0;
 }
 
-/* the decoder keeps the time of the live picture until it shows one of the stream */
-bool cDvbPlayer::waitFirstPicture(uint64_t livePts)
+/* the decoder keeps the time of the live picture until it shows one of the
+ * stream; going on from a held picture, until it has reached that */
+bool cDvbPlayer::waitFirstPicture(uint64_t livePts, int64_t from)
 {
 	for (int i = 0; i < 250 && !mStop && !mAbort; i++)
 	{
 		uint64_t pts = decoderPts();
-		if (pts && pts != livePts)
+		if (pts && pts != livePts && (from < 0 || ((pts - from) & 0x1ffffffffLL) < (1LL << 32)))
 			return true;
 		usleep(20000);
 	}
@@ -657,6 +668,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 	mBytes = 0;
 	mGrowing = growing;
 	mFollow = false;
+	mAudioFrom = -1;
 	error = 0;
 
 	int ret = openInput(url, userAgent, headerFields);
@@ -689,6 +701,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 			ts += wrap;
 		hal_info("%s: from the held picture at %lld\n", __func__, (long long)held);
 		av_seek_frame(mFmt, mVideoIdx, ts, AVSEEK_FLAG_BACKWARD);
+		mAudioFrom = held;
 	}
 	else if (startMs > 0)
 	{
@@ -706,7 +719,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, mAudioFd, std::ref(mAudioQ), std::ref(mAudioGen));
 	mPlaying = true;
 
-	if (!waitFirstPicture(livePts))
+	if (!waitFirstPicture(livePts, held))
 		hal_info("%s: no picture yet\n", __func__);
 	videoDecoder->HoldPicture(false);
 	if (mAbort)

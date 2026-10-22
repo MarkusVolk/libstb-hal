@@ -77,7 +77,7 @@ class cDvbPlayer : public cHwPlayer
 		int64_t pts90(const AVPacket *pkt, const AVStream *st) const;
 		void push(Queue &q, std::vector<uint8_t> &pes);
 		uint64_t decoderPts();
-		bool waitFirstPicture(uint64_t livePts);
+		bool waitFirstPicture(uint64_t livePts, int64_t from);
 
 		std::atomic<bool> mAbort;
 		std::atomic<bool> mStop;
@@ -91,6 +91,7 @@ class cDvbPlayer : public cHwPlayer
 		bool mGrowing;
 		std::atomic<bool> mFollow;       /* wait at the end of a growing recording */
 		bool mDemuxDone;
+		int64_t mAudioFrom;               /* 90 kHz, the sound before is left out, -1: none */
 		int mFd;                          /* a local file, read through mIo */
 		AVIOContext *mIo;
 		AVFormatContext *mFmt;
