@@ -70,6 +70,8 @@ class cStarfishPlayer : public cHwPlayer
 		bool preroll(int &error);
 		std::string loadPayload(const std::string &videoCodec, const std::string &audioCodec);
 		int64_t packetPts(const AVPacket *pkt) const;
+		bool isJump(int64_t ns, int es) const;
+		void smoothJumps(AVPacket *pkt);
 
 		void demuxLoop();
 		void feedLoop(int esData);
@@ -92,6 +94,9 @@ class cStarfishPlayer : public cHwPlayer
 		std::atomic<int64_t> mSeekTarget; /* ns, absolute */
 		std::atomic<bool> mFlushing;
 		bool mWaitKey;
+		int64_t mTsOffset;              /* ns, added to every packet after a jump */
+		int64_t mTsPrevOffset;          /* ns, the one before, for late packets of before the jump */
+		int64_t mLastDts[3];            /* ns, per esData, with the offset */
 		std::mutex mFeedLock[3];        /* per esData: a packet is being fed */
 		int mFd;                        /* a growing recording */
 		AVIOContext *mIo;

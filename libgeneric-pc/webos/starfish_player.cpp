@@ -56,6 +56,11 @@ static const int IO_BUFFER = 64 * 1024;
 static const int GROW_TIMEOUT_MS = 10000;
 /* how far feeding may run ahead of the picture on screen, as in Kodi */
 static const int64_t MAX_FEED_AHEAD = 1600000000LL;
+/* a timestamp further from the one before is a jump, not a gap */
+static const int64_t JUMP_BACK = 500000000LL;
+static const int64_t JUMP_AHEAD = 5000000000LL;
+/* what a jump is closed with: about one frame */
+static const int64_t JUMP_STEP = 40000000LL;
 
 static std::string averr(int e)
 {
@@ -67,7 +72,7 @@ static std::string averr(int e)
 cStarfishPlayer::cStarfishPlayer()
 	: mAbort(false), mStop(false), mLoaded(false), mEof(false),
 	  mFramePts(AV_NOPTS_VALUE), mDemuxPts(AV_NOPTS_VALUE), mBytes(0),
-	  mStartPts(0), mFileStart(0), mTimeSet(false), mSeekReq(false), mSeekTarget(0), mFlushing(false), mWaitKey(false),
+	  mStartPts(0), mFileStart(0), mTimeSet(false), mSeekReq(false), mSeekTarget(0), mFlushing(false), mWaitKey(false), mTsOffset(0), mTsPrevOffset(0),
 	  mFd(-1), mIo(NULL), mFmt(NULL), mVideoIdx(-1), mAudioIdx(-1),
 	  mAdts(false), mApi(NULL), mLoadDone(false), mUnloadDone(false)
 {
@@ -135,6 +140,50 @@ int64_t cStarfishPlayer::packetPts(const AVPacket *pkt) const
 	if (t == AV_NOPTS_VALUE)
 		return AV_NOPTS_VALUE;
 	return av_rescale_q(t, mFmt->streams[pkt->stream_index]->time_base, NS);
+}
+
+/* streams with advertising spliced in, as the free channels have, start
+ * the time anew where an advert begins or ends; the pipeline would wait
+ * for a picture that never comes that far, or drop every frame as late.
+ * The time runs on instead, across the jump. Audio and video do not
+ * cross it in the same packet: what still comes from before keeps the
+ * offset of before. */
+bool cStarfishPlayer::isJump(int64_t ns, int es) const
+{
+	int64_t last = mLastDts[es];
+	return last != AV_NOPTS_VALUE && (ns < last - JUMP_BACK || ns > last + JUMP_AHEAD);
+}
+
+void cStarfishPlayer::smoothJumps(AVPacket *pkt)
+{
+	int64_t t = pkt->dts != AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+	if (t == AV_NOPTS_VALUE)
+		return;
+	AVRational tb = mFmt->streams[pkt->stream_index]->time_base;
+	int es = pkt->stream_index == mVideoIdx ? 1 : 2;
+	int64_t raw = av_rescale_q(t, tb, NS);
+	int64_t offset = mTsOffset;
+	if (isJump(raw + offset, es))
+	{
+		if (!isJump(raw + mTsPrevOffset, es))
+			offset = mTsPrevOffset;
+		else
+		{
+			mTsPrevOffset = mTsOffset;
+			mTsOffset = mLastDts[es] + JUMP_STEP - raw;
+			offset = mTsOffset;
+			hal_info("%s: time jumps by %" PRId64 " ms, runs on\n", __func__, (mTsPrevOffset - mTsOffset) / 1000000);
+		}
+	}
+	mLastDts[es] = raw + offset;
+	if (offset)
+	{
+		int64_t off = av_rescale_q(offset, NS, tb);
+		if (pkt->pts != AV_NOPTS_VALUE)
+			pkt->pts += off;
+		if (pkt->dts != AV_NOPTS_VALUE)
+			pkt->dts += off;
+	}
 }
 
 /* HLS offers every variant as a stream of its own, with its bandwidth;
@@ -349,6 +398,8 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 
 	mSeekReq = false;
 	mWaitKey = false;
+	mTsOffset = mTsPrevOffset = 0;
+	mLastDts[0] = mLastDts[1] = mLastDts[2] = AV_NOPTS_VALUE;
 	mFmt = avformat_alloc_context();
 	mFmt->interrupt_callback.callback = interruptCb;
 	mFmt->interrupt_callback.opaque = this;
@@ -669,6 +720,8 @@ void cStarfishPlayer::doSeek()
 		}
 		mTimeSet = false;
 		mFramePts = AV_NOPTS_VALUE;
+		mTsOffset = mTsPrevOffset = 0;
+		mLastDts[0] = mLastDts[1] = mLastDts[2] = AV_NOPTS_VALUE;
 		mEof = false;
 		mStartPts = target;
 	}
@@ -728,6 +781,7 @@ void cStarfishPlayer::demuxLoop()
 				}
 				mWaitKey = false;
 			}
+			smoothJumps(pkt);
 			int64_t pts = packetPts(pkt);
 			if (pts != AV_NOPTS_VALUE)
 				mDemuxPts = pts;
