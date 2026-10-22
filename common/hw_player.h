@@ -1,5 +1,5 @@
 /*
- * A decoder of the platform's own in front of mpv
+ * A decoder of the platform's own in front of the software player
  *
  * Copyright (C) 2026 Markus Volk
  *
@@ -29,7 +29,7 @@ class cHwPlayer
 		/* before every start(): forget an earlier abort */
 		virtual void reset() = 0;
 		/* blocks until the stream plays, or until it is clear the decoder
-		 * cannot take it (UNSUPPORTED, mpv plays it then); audioUrl: the
+		 * cannot take it (UNSUPPORTED, the fallback plays it then); audioUrl: the
 		 * sound from a stream of its own, startMs: where in a file to
 		 * begin, growing: a recording that is still written */
 		virtual Result start(const std::string &url, const std::string &audioUrl, const std::string &userAgent,
