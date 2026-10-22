@@ -65,7 +65,11 @@ class cDvbPlayer : public cHwPlayer
 		static int ioRead(void *opaque, uint8_t *buf, int size);
 		static int64_t ioSeek(void *opaque, int64_t offset, int whence);
 
-		int openInput(const std::string &url, const std::string &userAgent, const std::vector<std::string> &headerFields);
+		int openInput(const std::string &url);
+		int openStream(AVFormatContext *&fmt, const std::string &url);
+		bool reopenSound();
+		void audioDemuxLoop();
+		AVStream *audioStream() const;
 		bool pickStreams();
 		void setupDecoders();
 		void releaseDecoders();
@@ -96,6 +100,10 @@ class cDvbPlayer : public cHwPlayer
 		int mFd;                          /* a local file, read through mIo */
 		AVIOContext *mIo;
 		AVFormatContext *mFmt;
+		AVFormatContext *mAudioFmt;       /* the sound from a stream of its own, else NULL */
+		std::string mAudioUrl, mUserAgent;
+		std::vector<std::string> mHeaderFields;
+		std::atomic<bool> mAudioSeekReq;
 		int mVideoIdx;
 		int mAudioIdx;
 		int mAudioId;
@@ -119,6 +127,7 @@ class cDvbPlayer : public cHwPlayer
 		unsigned mAudioGen;
 
 		std::thread mDemuxThread;
+		std::thread mAudioDemuxThread;
 		std::thread mVideoThread;
 		std::thread mAudioThread;
 };

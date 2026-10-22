@@ -176,7 +176,7 @@ int streamTypeFor(enum AVCodecID id)
 cDvbPlayer::cDvbPlayer()
 	: mAbort(false), mStop(false), mPlaying(false), mEof(false), mPaused(false), mTrick(false),
 	  mBytes(0), mSeekReq(false), mSeekTarget(0), mGrowing(false), mFollow(false), mDemuxDone(false), mAudioFrom(-1), mFd(-1),
-	  mIo(NULL), mFmt(NULL), mVideoIdx(-1), mAudioIdx(-1), mAudioId(-1), mWantAudio(-1),
+	  mIo(NULL), mFmt(NULL), mAudioFmt(NULL), mAudioSeekReq(false), mVideoIdx(-1), mAudioIdx(-1), mAudioId(-1), mWantAudio(-1),
 	  mVideoType(-1), mAudioType(-1), mAdts(false), mSpsSeen(false), mStart90(0),
 	  mVideoFd(-1), mAudioFd(-1), mVideoFlags(0), mAudioFlags(0), mGen(0), mVideoGen(0), mAudioGen(0)
 {
@@ -247,7 +247,7 @@ int64_t cDvbPlayer::ioSeek(void *opaque, int64_t offset, int whence)
 	return lseek64(p->mFd, offset, whence & ~AVSEEK_FORCE);
 }
 
-int cDvbPlayer::openInput(const std::string &url, const std::string &userAgent, const std::vector<std::string> &headerFields)
+int cDvbPlayer::openInput(const std::string &url)
 {
 	std::string path;
 	if (url.compare(0, 7, "file://") == 0)
@@ -255,14 +255,14 @@ int cDvbPlayer::openInput(const std::string &url, const std::string &userAgent, 
 	else if (!url.empty() && url[0] == '/')
 		path = url;
 
+	if (path.empty())
+		return openStream(mFmt, url);
+
 	mFmt = avformat_alloc_context();
 	if (!mFmt)
 		return AVERROR(ENOMEM);
 	mFmt->interrupt_callback.callback = interruptCb;
 	mFmt->interrupt_callback.opaque = this;
-
-	AVDictionary *opts = NULL;
-	if (!path.empty())
 	{
 		mFd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
 		if (mFd < 0)
@@ -277,22 +277,67 @@ int cDvbPlayer::openInput(const std::string &url, const std::string &userAgent, 
 		mFmt->probesize = 512 * 1024;
 		mFmt->max_analyze_duration = AV_TIME_BASE / 2;
 	}
-	else
-	{
-		if (!userAgent.empty())
-			av_dict_set(&opts, "user_agent", userAgent.c_str(), 0);
-		std::string headers;
-		for (size_t i = 0; i < headerFields.size(); i++)
-			headers += headerFields[i] + "\r\n";
-		if (!headers.empty())
-			av_dict_set(&opts, "headers", headers.c_str(), 0);
-	}
 
-	int ret = avformat_open_input(&mFmt, path.empty() ? url.c_str() : path.c_str(), NULL, &opts);
-	av_dict_free(&opts);
+	int ret = avformat_open_input(&mFmt, path.c_str(), NULL, NULL);
 	if (ret < 0)
 		return ret;
 	return avformat_find_stream_info(mFmt, NULL);
+}
+
+/* a stream from the network, with the user agent and header fields of the start */
+int cDvbPlayer::openStream(AVFormatContext *&fmt, const std::string &url)
+{
+	fmt = avformat_alloc_context();
+	if (!fmt)
+		return AVERROR(ENOMEM);
+	fmt->interrupt_callback.callback = interruptCb;
+	fmt->interrupt_callback.opaque = this;
+
+	AVDictionary *opts = NULL;
+	if (!mUserAgent.empty())
+		av_dict_set(&opts, "user_agent", mUserAgent.c_str(), 0);
+	std::string headers;
+	for (size_t i = 0; i < mHeaderFields.size(); i++)
+		headers += mHeaderFields[i] + "\r\n";
+	if (!headers.empty())
+		av_dict_set(&opts, "headers", headers.c_str(), 0);
+
+	int ret = avformat_open_input(&fmt, url.c_str(), NULL, &opts);
+	av_dict_free(&opts);
+	if (ret < 0)
+		return ret;
+	return avformat_find_stream_info(fmt, NULL);
+}
+
+AVStream *cDvbPlayer::audioStream() const
+{
+	return (mAudioFmt ? mAudioFmt : mFmt)->streams[mAudioIdx];
+}
+
+/* a live stream has no end: its sound is opened anew */
+bool cDvbPlayer::reopenSound()
+{
+	for (int tries = 0; tries < 5 && !mStop; tries++)
+	{
+		if (tries)
+			usleep(1000000);
+		AVFormatContext *fmt = NULL;
+		int ret = openStream(fmt, mAudioUrl);
+		int idx = ret >= 0 ? av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0) : ret;
+		if (idx >= 0)
+		{
+			for (unsigned i = 0; i < fmt->nb_streams; i++)
+				fmt->streams[i]->discard = (int)i == idx ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+			avformat_close_input(&mAudioFmt);
+			mAudioFmt = fmt;
+			mAudioIdx = idx;
+			hal_info("%s: the sound is open again\n", __func__);
+			return true;
+		}
+		if (fmt)
+			avformat_close_input(&fmt);
+	}
+	return false;
 }
 
 bool cDvbPlayer::pickStreams()
@@ -316,32 +361,40 @@ bool cDvbPlayer::pickStreams()
 	}
 
 	mAudioIdx = -1;
-	for (unsigned i = 0; i < mFmt->nb_streams; i++)
+	if (mAudioFmt)
+		mAudioIdx = av_find_best_stream(mAudioFmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+	else
 	{
-		AVStream *st = mFmt->streams[i];
-		if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && trackId(st) == mWantAudio)
-			mAudioIdx = i;
+		for (unsigned i = 0; i < mFmt->nb_streams; i++)
+		{
+			AVStream *st = mFmt->streams[i];
+			if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && trackId(st) == mWantAudio)
+				mAudioIdx = i;
+		}
+		if (mAudioIdx < 0)
+			mAudioIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_AUDIO, -1, mVideoIdx, NULL, 0);
 	}
-	if (mAudioIdx < 0)
-		mAudioIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_AUDIO, -1, mVideoIdx, NULL, 0);
 	if (mAudioIdx >= 0)
 	{
-		enum AVCodecID acodec = mFmt->streams[mAudioIdx]->codecpar->codec_id;
+		enum AVCodecID acodec = audioStream()->codecpar->codec_id;
 		mAudioType = bypassFor(acodec);
 		if (mAudioType < 0)
 		{
 			hal_info("%s: audio %s goes on to the fallback\n", __func__, avcodec_get_name(acodec));
 			return false;
 		}
-		mAudioId = trackId(mFmt->streams[mAudioIdx]);
+		mAudioId = trackId(audioStream());
 	}
 	for (unsigned i = 0; i < mFmt->nb_streams; i++)
-		if ((int)i != mVideoIdx && (int)i != mAudioIdx)
+		if ((int)i != mVideoIdx && (mAudioFmt || (int)i != mAudioIdx))
 			mFmt->streams[i]->discard = AVDISCARD_ALL;
+	for (unsigned i = 0; mAudioFmt && i < mAudioFmt->nb_streams; i++)
+		if ((int)i != mAudioIdx)
+			mAudioFmt->streams[i]->discard = AVDISCARD_ALL;
 
 	mStart90 = mFmt->start_time != AV_NOPTS_VALUE ? av_rescale(mFmt->start_time, 90000, AV_TIME_BASE) : 0;
 	hal_info("%s: %s, video %s, audio %s\n", __func__, name, avcodec_get_name(vcodec),
-		 mAudioIdx >= 0 ? avcodec_get_name(mFmt->streams[mAudioIdx]->codecpar->codec_id) : "none");
+		 mAudioIdx >= 0 ? avcodec_get_name(audioStream()->codecpar->codec_id) : "none");
 	return true;
 }
 
@@ -436,7 +489,7 @@ bool cDvbPlayer::videoPes(AVPacket *pkt, std::vector<uint8_t> &pes)
 
 bool cDvbPlayer::audioPes(AVPacket *pkt, std::vector<uint8_t> &pes)
 {
-	AVStream *st = mFmt->streams[mAudioIdx];
+	AVStream *st = audioStream();
 	int64_t pts = pts90(pkt, st);
 	AVCodecParameters *par = st->codecpar;
 	bool adts = pkt->size > 1 && pkt->data[0] == 0xff && (pkt->data[1] & 0xf0) == 0xf0;
@@ -547,11 +600,59 @@ void cDvbPlayer::doSeek()
 	hal_info("%s: to %lld ms%s\n", __func__, (long long)target, ret < 0 ? ", failed" : "");
 	if (ret < 0)
 		return;
+	if (mAudioFmt)
+		setAndWake(mAudioSeekReq);
 	flush();
 	mSpsSeen = false;
 	mDemuxDone = false;
 	mAudioFrom = -1;
 	mEof = false;
+}
+
+/* the sound from a stream of its own, read beside the video */
+void cDvbPlayer::audioDemuxLoop()
+{
+	AVPacket *pkt = av_packet_alloc();
+	bool ended = false;
+	while (!mStop)
+	{
+		if (mAudioSeekReq)
+		{
+			mAudioSeekReq = false;
+			int64_t start = mFmt->start_time != AV_NOPTS_VALUE ? mFmt->start_time : 0;
+			if (av_seek_frame(mAudioFmt, -1, start + mSeekTarget * 1000, AVSEEK_FLAG_BACKWARD) < 0)
+				hal_info("%s: the sound does not seek\n", __func__);
+			ended = false;
+		}
+		if (ended)
+		{
+			std::unique_lock<std::mutex> lock(mQueueLock);
+			mQueueCond.wait_for(lock, std::chrono::milliseconds(200), [this] { return mStop || mAudioSeekReq; });
+			continue;
+		}
+		int ret = av_read_frame(mAudioFmt, pkt);
+		if (ret == AVERROR(EAGAIN))
+		{
+			usleep(10000);
+			continue;
+		}
+		if (ret < 0)
+		{
+			if (!mStop && mFmt->duration <= 0 && reopenSound())
+				continue;
+			ended = true;
+			continue;
+		}
+		std::vector<uint8_t> pes;
+		if (pkt->stream_index == mAudioIdx && !mTrick && !mAudioSeekReq)
+		{
+			mBytes += pkt->size;
+			if (audioPes(pkt, pes))
+				push(mAudioQ, pes);
+		}
+		av_packet_unref(pkt);
+	}
+	av_packet_free(&pkt);
 }
 
 void cDvbPlayer::demuxLoop()
@@ -615,11 +716,11 @@ void cDvbPlayer::demuxLoop()
 			if (videoPes(pkt, pes))
 				push(mVideoQ, pes);
 		}
-		else if (pkt->stream_index == mAudioIdx && !waitKey && !mTrick)
+		else if (!mAudioFmt && pkt->stream_index == mAudioIdx && !waitKey && !mTrick)
 		{
 			/* the sound begins at the picture to go on from; the decoder
 			 * keeps the picture in time with it and drops what is before */
-			int64_t apts = pts90(pkt, mFmt->streams[mAudioIdx]);
+			int64_t apts = pts90(pkt, audioStream());
 			if (mAudioFrom >= 0 && apts >= 0 && ((mAudioFrom - apts) & 0x1ffffffffLL) < (1LL << 32))
 			{
 				av_packet_unref(pkt);
@@ -664,7 +765,7 @@ bool cDvbPlayer::waitFirstPicture(uint64_t livePts, int64_t from)
 	return false;
 }
 
-cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & /*audioUrl*/, const std::string &userAgent,
+cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &audioUrl, const std::string &userAgent,
 				    const std::vector<std::string> &headerFields, int &error, int startMs, bool growing)
 {
 	stop();
@@ -679,9 +780,16 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 	mGrowing = growing;
 	mFollow = false;
 	mAudioFrom = -1;
+	mAudioSeekReq = false;
+	mUserAgent = userAgent;
+	mHeaderFields = headerFields;
+	mAudioUrl = growing ? "" : audioUrl;
 	error = 0;
 
-	int ret = openInput(url, userAgent, headerFields);
+	int ret = openInput(url);
+	/* the sound as a stream of its own, as YouTube has it */
+	if (ret >= 0 && !mAudioUrl.empty())
+		ret = openStream(mAudioFmt, mAudioUrl);
 	if (mAbort)
 	{
 		stop();
@@ -717,6 +825,8 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 	{
 		int64_t start = mFmt->start_time != AV_NOPTS_VALUE ? mFmt->start_time : 0;
 		av_seek_frame(mFmt, -1, start + (int64_t)startMs * 1000, AVSEEK_FLAG_BACKWARD);
+		if (mAudioFmt)
+			av_seek_frame(mAudioFmt, -1, start + (int64_t)startMs * 1000, AVSEEK_FLAG_BACKWARD);
 	}
 
 	uint64_t livePts = videoDecoder->GetPTS();
@@ -724,6 +834,8 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 	mVideoGen = mAudioGen = mGen;
 	mFollow = true;
 	mDemuxThread = std::thread(&cDvbPlayer::demuxLoop, this);
+	if (mAudioFmt && mAudioIdx >= 0)
+		mAudioDemuxThread = std::thread(&cDvbPlayer::audioDemuxLoop, this);
 	mVideoThread = std::thread(&cDvbPlayer::writeLoop, this, mVideoFd, std::ref(mVideoQ), std::ref(mVideoGen));
 	if (mAudioIdx >= 0)
 		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, mAudioFd, std::ref(mAudioQ), std::ref(mAudioGen));
@@ -749,6 +861,8 @@ void cDvbPlayer::stop()
 		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
 	if (mDemuxThread.joinable())
 		mDemuxThread.join();
+	if (mAudioDemuxThread.joinable())
+		mAudioDemuxThread.join();
 	if (mVideoThread.joinable())
 		mVideoThread.join();
 	if (mAudioThread.joinable())
@@ -763,6 +877,8 @@ void cDvbPlayer::stop()
 	mAudioQ.bytes = 0;
 	if (mFmt)
 		avformat_close_input(&mFmt);
+	if (mAudioFmt)
+		avformat_close_input(&mAudioFmt);
 	if (mIo)
 	{
 		av_freep(&mIo->buffer);
@@ -835,11 +951,12 @@ bool cDvbPlayer::position(int64_t &posMs, int64_t &durMs)
 void cDvbPlayer::audioTracks(std::vector<Track> &tracks)
 {
 	tracks.clear();
-	if (!mFmt)
+	AVFormatContext *fmt = mAudioFmt ? mAudioFmt : mFmt;
+	if (!fmt)
 		return;
-	for (unsigned i = 0; i < mFmt->nb_streams; i++)
+	for (unsigned i = 0; i < fmt->nb_streams; i++)
 	{
-		AVStream *st = mFmt->streams[i];
+		AVStream *st = fmt->streams[i];
 		if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO || bypassFor(st->codecpar->codec_id) < 0)
 			continue;
 		Track t;

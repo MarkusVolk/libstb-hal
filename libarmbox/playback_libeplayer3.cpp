@@ -189,8 +189,7 @@ bool cPlayback::Start(char *filename, int vpid, int vtype, int apid, int ac3, in
 
 	if (hwActive)
 		Stop();
-	/* the sound from a stream of its own goes on through libeplayer3 */
-	if (hw && filename2.empty())
+	if (hw)
 	{
 		std::vector<std::string> fields;
 		std::string userAgent;
