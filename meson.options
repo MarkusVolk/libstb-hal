@@ -1,2 +1,6 @@
 option('boxtype', type : 'combo', choices : ['generic'], value : 'generic',
 	description : 'Hardware the library is built for')
+option('webos', type : 'feature', value : 'disabled',
+	description : 'Build for LG webOS TVs')
+option('webos_protocols', type : 'string', value : '',
+	description : 'Directory with the protocol descriptions of webos-wayland-extensions')
