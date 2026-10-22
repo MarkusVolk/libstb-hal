@@ -73,6 +73,7 @@ class cStarfishPlayer : public cHwPlayer
 		int64_t packetPts(const AVPacket *pkt) const;
 		bool isJump(int64_t ns, int es) const;
 		void smoothJumps(AVPacket *pkt, int es);
+		void fillTime(AVPacket *pkt, int es);
 		AVStream *audioStream() const;
 		int openInput(AVFormatContext *&fmt, const std::string &url, const std::string &userAgent,
 			      const std::vector<std::string> &headerFields);
@@ -96,6 +97,9 @@ class cStarfishPlayer : public cHwPlayer
 		std::atomic<int64_t> mFramePts; /* ns, from FRAMEREADY */
 		std::atomic<int64_t> mDemuxPts; /* ns, last packet read */
 		std::atomic<uint64_t> mBytes;
+		std::atomic<unsigned> mDropped; /* frames the TV dropped */
+		std::atomic<unsigned> mNoPts[3]; /* per esData: packets without a time, given one */
+		int64_t mNextTs[3];             /* ns, per esData: where the next packet would start */
 		int64_t mStartPts;              /* ns, first video keyframe */
 		int64_t mFileStart;             /* ns, start of the stream */
 		bool mTimeSet;

@@ -71,7 +71,7 @@ static std::string averr(int e)
 
 cStarfishPlayer::cStarfishPlayer()
 	: mAbort(false), mStop(false), mLoaded(false), mEof(false),
-	  mFramePts(AV_NOPTS_VALUE), mDemuxPts(AV_NOPTS_VALUE), mBytes(0),
+	  mFramePts(AV_NOPTS_VALUE), mDemuxPts(AV_NOPTS_VALUE), mBytes(0), mDropped(0),
 	  mStartPts(0), mFileStart(0), mTimeSet(false), mSeekReq(false), mSeekTarget(0), mFlushing(false), mWaitKey(false), mTsOffset(0), mTsPrevOffset(0),
 	  mFd(-1), mIo(NULL), mFmt(NULL), mAudioFmt(NULL), mVideoIdx(-1), mAudioIdx(-1), mAudioSeekReq(false),
 	  mAdts(false), mApi(NULL), mLoadDone(false), mUnloadDone(false)
@@ -155,6 +155,34 @@ AVStream *cStarfishPlayer::audioStream() const
  * The time runs on instead, across the jump. Audio and video do not
  * cross it in the same packet: what still comes from before keeps the
  * offset of before. */
+/* HLS segments now and then carry a packet without any time; the
+ * pipeline takes nothing without one, and a lost picture breaks up the
+ * ones after it until the next keyframe. It starts where the packet
+ * before it ended. */
+void cStarfishPlayer::fillTime(AVPacket *pkt, int es)
+{
+	AVRational tb = pkt->time_base;
+	int64_t dur = pkt->duration > 0 ? av_rescale_q(pkt->duration, tb, NS) : 0;
+	if (!dur && es == 1 && mVideoIdx >= 0)
+	{
+		AVStream *vs = mFmt->streams[mVideoIdx];
+		AVRational fps = vs->avg_frame_rate.num > 0 && vs->avg_frame_rate.den > 0 ? vs->avg_frame_rate : vs->r_frame_rate;
+		if (fps.num > 0 && fps.den > 0)
+			dur = av_rescale(1000000000, fps.den, fps.num);
+	}
+	int64_t t = pkt->dts != AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
+	if (t != AV_NOPTS_VALUE)
+	{
+		mNextTs[es] = av_rescale_q(t, tb, NS) + dur;
+		return;
+	}
+	if (mNextTs[es] == AV_NOPTS_VALUE)
+		return;
+	pkt->pts = pkt->dts = av_rescale_q(mNextTs[es], NS, tb);
+	mNextTs[es] += dur;
+	mNoPts[es]++;
+}
+
 bool cStarfishPlayer::isJump(int64_t ns, int es) const
 {
 	int64_t last = mLastDts[es];
@@ -305,6 +333,8 @@ bool cStarfishPlayer::preroll(int &error)
 			return false;
 		}
 		pkt->time_base = mFmt->streams[pkt->stream_index]->time_base;
+		if (pkt->stream_index == mVideoIdx || (!mAudioFmt && pkt->stream_index == mAudioIdx))
+			fillTime(pkt, pkt->stream_index == mVideoIdx ? 1 : 2);
 		int64_t pts = packetPts(pkt);
 		if (!key && pkt->stream_index == mVideoIdx && (pkt->flags & AV_PKT_FLAG_KEY) && pts != AV_NOPTS_VALUE)
 		{
@@ -444,6 +474,12 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 	mFramePts = AV_NOPTS_VALUE;
 	mDemuxPts = AV_NOPTS_VALUE;
 	mBytes = 0;
+	mDropped = 0;
+	for (int i = 0; i < 3; i++)
+	{
+		mNoPts[i] = 0;
+		mNextTs[i] = AV_NOPTS_VALUE;
+	}
 	mAdts = false;
 	mAudioUrl = growing ? "" : audioUrl;
 	mUserAgent = userAgent;
@@ -724,7 +760,7 @@ void cStarfishPlayer::event(int type, int64_t numValue, const char *strValue)
 			hal_info("%s: 0x%x %s\n", __func__, type, strValue ? strValue : "");
 			break;
 		case SF_EVENT_DROPPED_FRAME:
-			hal_debug("%s: %" PRId64 " frames dropped\n", __func__, numValue);
+			mDropped += numValue > 0 ? numValue : 1;
 			return;
 		default:
 			hal_debug("%s: 0x%x %" PRId64 " %s\n", __func__, type, numValue, strValue ? strValue : "");
@@ -799,6 +835,7 @@ void cStarfishPlayer::doSeek()
 		mFramePts = AV_NOPTS_VALUE;
 		mTsOffset = mTsPrevOffset = 0;
 		mLastDts[0] = mLastDts[1] = mLastDts[2] = AV_NOPTS_VALUE;
+		mNextTs[0] = mNextTs[1] = mNextTs[2] = AV_NOPTS_VALUE;
 		mEof = false;
 		mStartPts = target;
 	}
@@ -821,6 +858,8 @@ void cStarfishPlayer::demuxLoop()
 		push(pkt->stream_index == mVideoIdx ? mVideoQ : mAudioQ, pkt);
 	mPreroll.clear();
 	bool sound = !mAudioFmt;
+	auto report = std::chrono::steady_clock::now();
+	unsigned dropped = 0, noPtsV = 0, noPtsA = 0;
 
 	AVPacket *pkt = av_packet_alloc();
 	bool ended = false;
@@ -837,6 +876,17 @@ void cStarfishPlayer::demuxLoop()
 			std::unique_lock<std::mutex> lk(mQueueLock);
 			mQueueCond.wait_for(lk, 200ms, [this] { return mStop || mSeekReq; });
 			continue;
+		}
+		auto now = std::chrono::steady_clock::now();
+		if (now - report >= 10s)
+		{
+			report = now;
+			if (mDropped != dropped || mNoPts[1] != noPtsV || mNoPts[2] != noPtsA)
+				hal_info("%s: %u frames dropped by the TV; packets without a time: %u video, %u audio\n", __func__,
+					 mDropped - dropped, mNoPts[1] - noPtsV, mNoPts[2] - noPtsA);
+			dropped = mDropped;
+			noPtsV = mNoPts[1];
+			noPtsA = mNoPts[2];
 		}
 		int r = av_read_frame(mFmt, pkt);
 		if (r == AVERROR(EAGAIN))
@@ -868,6 +918,7 @@ void cStarfishPlayer::demuxLoop()
 				}
 				mWaitKey = false;
 			}
+			fillTime(pkt, pkt->stream_index == mVideoIdx ? 1 : 2);
 			smoothJumps(pkt, pkt->stream_index == mVideoIdx ? 1 : 2);
 			int64_t pts = packetPts(pkt);
 			if (pts != AV_NOPTS_VALUE)
@@ -965,6 +1016,7 @@ void cStarfishPlayer::audioDemuxLoop()
 				if (t != AV_NOPTS_VALUE)
 					hal_info("%s: the sound starts %" PRId64 " ms from the picture\n", __func__, (t - mStartPts) / 1000000);
 			}
+			fillTime(pkt, 2);
 			smoothJumps(pkt, 2);
 			mBytes += pkt->size;
 			push(mAudioQ, av_packet_clone(pkt));
