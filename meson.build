@@ -11,9 +11,38 @@ project('libstb-hal', 'c', 'cpp',
 )
 
 boxtype = get_option('boxtype')
-if boxtype != 'generic'
-	error('the Meson build supports boxtype=generic only, use autotools for @0@'.format(boxtype))
+boxmodel = get_option('boxmodel')
+box_models = {
+	'generic' : ['generic'],
+	'armbox' : ['hd60', 'hd61', 'multibox', 'multiboxse', 'hd51', 'bre2ze4k', 'h7', 'e4hdultra', 'protek4k',
+		'osmini4k', 'osmio4k', 'osmio4kplus', 'vusolo4k', 'vuduo4k', 'vuduo4kse', 'vuultimo4k',
+		'vuuno4k', 'vuuno4kse', 'vuzero4k'],
+	'mipsbox' : ['vuduo', 'vuduo2', 'gb800se', 'osnino', 'osninoplus', 'osninopro'],
+}
+if boxtype != 'generic' and boxmodel == 'generic'
+	error('boxtype @0@ needs a boxmodel, one of: @1@'.format(boxtype, ', '.join(box_models[boxtype])))
 endif
+if boxmodel not in box_models[boxtype]
+	error('boxmodel @0@ does not belong to boxtype @1@'.format(boxmodel, boxtype))
+endif
+box_groups = {
+	'VUPLUS_ARM' : ['vusolo4k', 'vuduo4k', 'vuduo4kse', 'vuultimo4k', 'vuuno4k', 'vuuno4kse', 'vuzero4k'],
+	'VUPLUS_MIPS' : ['vuduo', 'vuduo2'],
+	'HISILICON' : ['hd60', 'hd61', 'multibox', 'multiboxse'],
+}
+box_groups += {'VUPLUS_ALL' : box_groups['VUPLUS_ARM'] + box_groups['VUPLUS_MIPS']}
+have_ci = boxtype != 'generic' and boxmodel not in ['hd60', 'multibox', 'multiboxse', 'osmini4k', 'osmio4k', 'osmio4kplus']
+box_defines = {
+	'generic' : 'HAVE_GENERIC_HARDWARE',
+	'armbox' : 'HAVE_ARM_HARDWARE',
+	'mipsbox' : 'HAVE_MIPS_HARDWARE',
+}[boxtype]
+box_defines = [box_defines, 'BOXMODEL_' + boxmodel.to_upper()]
+foreach group, models : box_groups
+	if boxmodel in models
+		box_defines += 'BOXMODEL_' + group
+	endif
+endforeach
 
 version = meson.project_version().split('.')
 
@@ -29,8 +58,10 @@ endif
 
 conf = configuration_data()
 conf.set('_GNU_SOURCE', 1)
-conf.set('HAVE_GENERIC_HARDWARE', 1)
-conf.set('BOXMODEL_GENERIC', 1)
+foreach define : box_defines
+	conf.set(define, 1)
+endforeach
+conf.set('ENABLE_FLV2MPEG4', get_option('flv2mpeg4') ? 1 : false)
 conf.set('DEBUG', get_option('debug') ? 1 : false)
 conf.set_quoted('NEUTRINO_MPV_CONF', get_option('prefix') / get_option('sysconfdir') / 'neutrino/mpv.conf')
 conf.set_quoted('PACKAGE_NAME', 'Tuxbox-libstb-hal')
@@ -50,9 +81,32 @@ hal_inc = include_directories('include')
 
 threads_dep = dependency('threads')
 rt_dep = meson.get_compiler('c').find_library('rt', required : false)
+ffmpeg_deps = [
+	dependency('libavformat', version : '>= 53.21.1'),
+	dependency('libavcodec', version : '>= 54.28.0'),
+	dependency('libavutil'),
+	dependency('libswresample'),
+	dependency('libswscale'),
+]
 
+hal_parts = []
 subdir('common')
-subdir('libgeneric-pc')
+hal_parts += libcommon
+if boxtype == 'generic'
+	subdir('libgeneric-pc')
+	hal_parts += libgeneric
+else
+	if have_ci
+		subdir('libdvbci')
+		hal_parts += libdvbci
+	endif
+	subdir('libeplayer3')
+	subdir('libarmbox')
+	if boxtype == 'mipsbox'
+		subdir('libmipsbox')
+	endif
+	hal_parts += [libbox, libeplayer3]
+endif
 subdir('tools')
 
 install_headers(
@@ -80,7 +134,7 @@ install_headers(
 )
 
 libstb_hal = shared_library('stb-hal',
-	link_whole : [libcommon, libgeneric],
+	link_whole : hal_parts,
 	version : '0.0.0',
 	soversion : '0',
 	install : true,
@@ -91,4 +145,5 @@ pkg.generate(libstb_hal,
 	name : 'libstb-hal',
 	description : 'Hardware abstraction of Neutrino',
 	subdirs : 'libstb-hal',
+	variables : ['boxtype=' + boxtype, 'boxmodel=' + boxmodel, 'boxdefines=' + ','.join(box_defines)],
 )
