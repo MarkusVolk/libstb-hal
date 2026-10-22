@@ -1151,6 +1151,8 @@ static void FFMPEGThread(Context_t *context)
 	ffmpeg_printf(10, "bufferSize [%u]\n", bufferSize);
 
 	int8_t isWaitingForFinish = 0;
+	int64_t eofFileSize = -1;
+	int32_t eofWaitIters = 0;
 
 	while (context && context->playback && context->playback->isPlaying)
 	{
@@ -1357,6 +1359,8 @@ static void FFMPEGThread(Context_t *context)
 
 		if (!isWaitingForFinish && (ffmpegStatus == 0))
 		{
+			eofFileSize = -1;
+			eofWaitIters = 0;
 			int64_t pts            = 0;
 			int64_t dts            = 0;
 			Track_t *videoTrack    = NULL;
@@ -1961,6 +1965,34 @@ static void FFMPEGThread(Context_t *context)
 				}
 				*/
 				ffmpegStatus = 0;
+			}
+
+			/* a local file that is still written to, like a timeshift:
+			 * wait for more data at its end instead of finishing */
+			AVIOContext *pb = avContextTab[cAVIdx] ? avContextTab[cAVIdx]->pb : NULL;
+			if (pb && (pb->seekable & AVIO_SEEKABLE_NORMAL) && !context->playback->isTSLiveMode)
+			{
+				int64_t size = avio_size(pb);
+				if (eofFileSize < 0)
+					eofFileSize = size;
+				if (size > eofFileSize)
+				{
+					eofFileSize = -1;
+					eofWaitIters = 0;
+					isWaitingForFinish = 0;
+					reset_finish_timeout();
+					avio_seek(pb, avio_tell(pb), SEEK_SET);
+					releaseMutex(__FILE__, __FUNCTION__, __LINE__);
+					usleep(100000);
+					continue;
+				}
+				if (eofWaitIters < 30)
+				{
+					eofWaitIters++;
+					releaseMutex(__FILE__, __FUNCTION__, __LINE__);
+					usleep(100000);
+					continue;
+				}
 			}
 
 			if (!is_finish_timeout() && !context->playback->isTSLiveMode)
