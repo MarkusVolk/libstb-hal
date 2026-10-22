@@ -73,7 +73,7 @@ cStarfishPlayer::cStarfishPlayer()
 	: mAbort(false), mStop(false), mLoaded(false), mEof(false),
 	  mFramePts(AV_NOPTS_VALUE), mDemuxPts(AV_NOPTS_VALUE), mBytes(0),
 	  mStartPts(0), mFileStart(0), mTimeSet(false), mSeekReq(false), mSeekTarget(0), mFlushing(false), mWaitKey(false), mTsOffset(0), mTsPrevOffset(0),
-	  mFd(-1), mIo(NULL), mFmt(NULL), mVideoIdx(-1), mAudioIdx(-1),
+	  mFd(-1), mIo(NULL), mFmt(NULL), mAudioFmt(NULL), mVideoIdx(-1), mAudioIdx(-1), mAudioSeekReq(false),
 	  mAdts(false), mApi(NULL), mLoadDone(false), mUnloadDone(false)
 {
 }
@@ -139,7 +139,14 @@ int64_t cStarfishPlayer::packetPts(const AVPacket *pkt) const
 	int64_t t = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
 	if (t == AV_NOPTS_VALUE)
 		return AV_NOPTS_VALUE;
-	return av_rescale_q(t, mFmt->streams[pkt->stream_index]->time_base, NS);
+	return av_rescale_q(t, pkt->time_base, NS);
+}
+
+AVStream *cStarfishPlayer::audioStream() const
+{
+	if (mAudioIdx < 0)
+		return NULL;
+	return (mAudioFmt ? mAudioFmt : mFmt)->streams[mAudioIdx];
 }
 
 /* streams with advertising spliced in, as the free channels have, start
@@ -154,13 +161,12 @@ bool cStarfishPlayer::isJump(int64_t ns, int es) const
 	return last != AV_NOPTS_VALUE && (ns < last - JUMP_BACK || ns > last + JUMP_AHEAD);
 }
 
-void cStarfishPlayer::smoothJumps(AVPacket *pkt)
+void cStarfishPlayer::smoothJumps(AVPacket *pkt, int es)
 {
 	int64_t t = pkt->dts != AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
 	if (t == AV_NOPTS_VALUE)
 		return;
-	AVRational tb = mFmt->streams[pkt->stream_index]->time_base;
-	int es = pkt->stream_index == mVideoIdx ? 1 : 2;
+	AVRational tb = pkt->time_base;
 	int64_t raw = av_rescale_q(t, tb, NS);
 	int64_t offset = mTsOffset;
 	if (isJump(raw + offset, es))
@@ -252,7 +258,7 @@ bool cStarfishPlayer::supported(std::string &videoCodec, std::string &audioCodec
 	}
 	if (mAudioIdx < 0)
 		return true;
-	switch (mFmt->streams[mAudioIdx]->codecpar->codec_id)
+	switch (audioStream()->codecpar->codec_id)
 	{
 		case AV_CODEC_ID_AAC:
 			audioCodec = "AAC";
@@ -267,7 +273,7 @@ bool cStarfishPlayer::supported(std::string &videoCodec, std::string &audioCodec
 			audioCodec = "MP3";
 			break;
 		default:
-			hal_info("%s: audio %s\n", __func__, avcodec_get_name(mFmt->streams[mAudioIdx]->codecpar->codec_id));
+			hal_info("%s: audio %s\n", __func__, avcodec_get_name(audioStream()->codecpar->codec_id));
 			return false;
 	}
 	return true;
@@ -279,7 +285,8 @@ bool cStarfishPlayer::preroll(int &error)
 {
 	AVPacket *pkt = av_packet_alloc();
 	bool key = false;
-	bool audio = mAudioIdx < 0 || mFmt->streams[mAudioIdx]->codecpar->codec_id != AV_CODEC_ID_AAC;
+	bool aac = mAudioIdx >= 0 && audioStream()->codecpar->codec_id == AV_CODEC_ID_AAC;
+	bool audio = !aac || mAudioFmt;
 	int n = 0;
 	while (!key || !audio)
 	{
@@ -297,13 +304,14 @@ bool cStarfishPlayer::preroll(int &error)
 			av_packet_free(&pkt);
 			return false;
 		}
+		pkt->time_base = mFmt->streams[pkt->stream_index]->time_base;
 		int64_t pts = packetPts(pkt);
 		if (!key && pkt->stream_index == mVideoIdx && (pkt->flags & AV_PKT_FLAG_KEY) && pts != AV_NOPTS_VALUE)
 		{
 			key = true;
 			mStartPts = pts;
 		}
-		if (key && (pkt->stream_index == mVideoIdx || pkt->stream_index == mAudioIdx))
+		if (key && (pkt->stream_index == mVideoIdx || (!mAudioFmt && pkt->stream_index == mAudioIdx)))
 		{
 			if (!audio && pkt->stream_index == mAudioIdx)
 			{
@@ -312,6 +320,25 @@ bool cStarfishPlayer::preroll(int &error)
 			}
 			mBytes += pkt->size;
 			mPreroll.push_back(av_packet_clone(pkt));
+		}
+		av_packet_unref(pkt);
+	}
+	/* a sound of its own: its first packet tells ADTS from raw */
+	while (mAudioFmt && aac && mAudioPreroll.empty())
+	{
+		int r = av_read_frame(mAudioFmt, pkt);
+		if (r < 0)
+		{
+			error = r;
+			av_packet_free(&pkt);
+			return false;
+		}
+		if (pkt->stream_index == mAudioIdx)
+		{
+			pkt->time_base = mAudioFmt->streams[mAudioIdx]->time_base;
+			mAdts = pkt->size > 2 && pkt->data[0] == 0xff && (pkt->data[1] & 0xf0) == 0xf0;
+			mBytes += pkt->size;
+			mAudioPreroll.push_back(av_packet_clone(pkt));
 		}
 		av_packet_unref(pkt);
 	}
@@ -335,7 +362,7 @@ std::string cStarfishPlayer::loadPayload(const std::string &videoCodec, const st
 	contents += "}";
 	if (mAudioIdx >= 0)
 	{
-		AVCodecParameters *a = mFmt->streams[mAudioIdx]->codecpar;
+		AVCodecParameters *a = audioStream()->codecpar;
 		int channels = a->ch_layout.nb_channels;
 		double khz = a->sample_rate / 1000.0;
 		if (a->codec_id == AV_CODEC_ID_AAC)
@@ -381,7 +408,32 @@ std::string cStarfishPlayer::loadPayload(const std::string &videoCodec, const st
 	return "{\"args\":[{\"mediaTransportType\":\"BUFFERSTREAM\",\"option\":" + option + "}]}";
 }
 
-cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std::string &userAgent,
+int cStarfishPlayer::openInput(AVFormatContext *&fmt, const std::string &url, const std::string &userAgent,
+			       const std::vector<std::string> &headerFields)
+{
+	if (!fmt)
+		fmt = avformat_alloc_context();
+	fmt->interrupt_callback.callback = interruptCb;
+	fmt->interrupt_callback.opaque = this;
+	AVDictionary *opts = NULL;
+	if (!userAgent.empty())
+		av_dict_set(&opts, "user_agent", userAgent.c_str(), 0);
+	std::string headers;
+	for (const std::string &f : headerFields)
+		headers += f + "\r\n";
+	if (!headers.empty())
+		av_dict_set(&opts, "headers", headers.c_str(), 0);
+	av_dict_set(&opts, "reconnect", "1", 0);
+	av_dict_set(&opts, "reconnect_streamed", "1", 0);
+	av_dict_set(&opts, "rw_timeout", "15000000", 0);
+	int r = avformat_open_input(&fmt, url.c_str(), NULL, &opts);
+	av_dict_free(&opts);
+	if (r < 0)
+		fmt = NULL;
+	return r;
+}
+
+cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std::string &audioUrl, const std::string &userAgent,
 					       const std::vector<std::string> &headerFields, int &error, int startMs, bool growing)
 {
 	stop();
@@ -393,6 +445,9 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 	mDemuxPts = AV_NOPTS_VALUE;
 	mBytes = 0;
 	mAdts = false;
+	mAudioUrl = growing ? "" : audioUrl;
+	mUserAgent = userAgent;
+	mHeaderFields = headerFields;
 	if (mAbort)
 		return ABORTED;
 
@@ -400,11 +455,10 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 	mWaitKey = false;
 	mTsOffset = mTsPrevOffset = 0;
 	mLastDts[0] = mLastDts[1] = mLastDts[2] = AV_NOPTS_VALUE;
-	mFmt = avformat_alloc_context();
-	mFmt->interrupt_callback.callback = interruptCb;
-	mFmt->interrupt_callback.opaque = this;
+	mAudioSeekReq = false;
 	if (growing)
 	{
+		mFmt = avformat_alloc_context();
 		mFd = open(url.c_str(), O_RDONLY | O_CLOEXEC);
 		if (mFd < 0)
 		{
@@ -418,22 +472,9 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 		mFmt->pb = mIo;
 		mFmt->flags |= AVFMT_FLAG_CUSTOM_IO;
 	}
-	AVDictionary *opts = NULL;
-	if (!userAgent.empty())
-		av_dict_set(&opts, "user_agent", userAgent.c_str(), 0);
-	std::string headers;
-	for (const std::string &f : headerFields)
-		headers += f + "\r\n";
-	if (!headers.empty())
-		av_dict_set(&opts, "headers", headers.c_str(), 0);
-	av_dict_set(&opts, "reconnect", "1", 0);
-	av_dict_set(&opts, "reconnect_streamed", "1", 0);
-	av_dict_set(&opts, "rw_timeout", "15000000", 0);
-	int r = avformat_open_input(&mFmt, url.c_str(), NULL, &opts);
-	av_dict_free(&opts);
+	int r = openInput(mFmt, url, userAgent, headerFields);
 	if (r < 0)
 	{
-		mFmt = NULL;
 		error = r;
 		hal_info("%s: open: %s\n", __func__, averr(r).c_str());
 		stop();
@@ -464,24 +505,44 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 	{
 		error = r;
 		hal_info("%s: stream info: %s\n", __func__, averr(r).c_str());
-		avformat_close_input(&mFmt);
+		stop();
 		return mAbort ? ABORTED : FAILED;
 	}
 	mVideoIdx = variant >= 0 ? variant : av_find_best_stream(mFmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-	mAudioIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_AUDIO, -1, mVideoIdx, NULL, 0);
-	/* HLS may carry the sound as a rendition of its own, outside the
-	 * program of the video variant */
-	if (mAudioIdx < 0)
-		mAudioIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+	if (!audioUrl.empty() && !growing)
+	{
+		/* the sound as a stream of its own, as YouTube has it */
+		r = openInput(mAudioFmt, audioUrl, userAgent, headerFields);
+		if (r >= 0)
+			r = avformat_find_stream_info(mAudioFmt, NULL);
+		if (r < 0)
+		{
+			error = r;
+			hal_info("%s: sound: %s\n", __func__, averr(r).c_str());
+			stop();
+			return mAbort ? ABORTED : FAILED;
+		}
+		mAudioIdx = av_find_best_stream(mAudioFmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+	}
+	else
+	{
+		mAudioIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_AUDIO, -1, mVideoIdx, NULL, 0);
+		/* HLS may carry the sound as a rendition of its own, outside the
+		 * program of the video variant */
+		if (mAudioIdx < 0)
+			mAudioIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+	}
 
 	std::string videoCodec, audioCodec;
 	if (!supported(videoCodec, audioCodec))
 	{
-		avformat_close_input(&mFmt);
+		stop();
 		return UNSUPPORTED;
 	}
 	for (unsigned i = 0; i < mFmt->nb_streams; i++)
-		mFmt->streams[i]->discard = ((int)i == mVideoIdx || (int)i == mAudioIdx) ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+		mFmt->streams[i]->discard = ((int)i == mVideoIdx || (!mAudioFmt && (int)i == mAudioIdx)) ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+	for (unsigned i = 0; mAudioFmt && i < mAudioFmt->nb_streams; i++)
+		mAudioFmt->streams[i]->discard = (int)i == mAudioIdx ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
 
 	mFileStart = mFmt->start_time != AV_NOPTS_VALUE ? av_rescale(mFmt->start_time, 1000, 1) : 0;
 	if (startMs > 0)
@@ -547,9 +608,13 @@ cStarfishPlayer::Result cStarfishPlayer::start(const std::string &url, const std
 	if (mAudioIdx >= 0)
 		mAudioThread = std::thread(&cStarfishPlayer::feedLoop, this, 2);
 	mDemuxThread = std::thread(&cStarfishPlayer::demuxLoop, this);
+	if (mAudioFmt)
+		mAudioDemuxThread = std::thread(&cStarfishPlayer::audioDemuxLoop, this);
 	hal_info("%s: %s %dx%d%s%s from %.3f s\n", __func__, videoCodec.c_str(),
 		 mFmt->streams[mVideoIdx]->codecpar->width, mFmt->streams[mVideoIdx]->codecpar->height,
 		 audioCodec.empty() ? "" : ", ", audioCodec.c_str(), mStartPts / 1e9);
+	if (mAudioFmt)
+		hal_info("%s: the sound from a stream of its own\n", __func__);
 	return OK;
 }
 
@@ -559,6 +624,8 @@ void cStarfishPlayer::stop()
 	mQueueCond.notify_all();
 	if (mDemuxThread.joinable())
 		mDemuxThread.join();
+	if (mAudioDemuxThread.joinable())
+		mAudioDemuxThread.join();
 	if (mVideoThread.joinable())
 		mVideoThread.join();
 	if (mAudioThread.joinable())
@@ -592,11 +659,16 @@ void cStarfishPlayer::stop()
 		glfb_priv->setExternalVideo(false);
 	mLoaded = false;
 	emptyQueues();
-	for (AVPacket *pkt : mPreroll)
-		av_packet_free(&pkt);
-	mPreroll.clear();
+	for (std::vector<AVPacket *> *v : { &mPreroll, &mAudioPreroll })
+	{
+		for (AVPacket *pkt : *v)
+			av_packet_free(&pkt);
+		v->clear();
+	}
 	if (mFmt)
 		avformat_close_input(&mFmt);
+	if (mAudioFmt)
+		avformat_close_input(&mAudioFmt);
 	if (mIo)
 	{
 		av_freep(&mIo->buffer);
@@ -676,12 +748,17 @@ void cStarfishPlayer::push(Queue &q, AVPacket *pkt)
 	mQueueCond.notify_all();
 }
 
-void cStarfishPlayer::closeQueues()
+void cStarfishPlayer::closeQueue(Queue &q)
 {
 	std::lock_guard<std::mutex> lk(mQueueLock);
-	mVideoQ.done = true;
-	mAudioQ.done = true;
+	q.done = true;
 	mQueueCond.notify_all();
+}
+
+void cStarfishPlayer::closeQueues()
+{
+	closeQueue(mVideoQ);
+	closeQueue(mAudioQ);
 }
 
 void cStarfishPlayer::emptyQueues()
@@ -729,6 +806,11 @@ void cStarfishPlayer::doSeek()
 	int r = av_seek_frame(mFmt, -1, av_rescale(target, AV_TIME_BASE, 1000000000), AVSEEK_FLAG_BACKWARD);
 	if (r < 0)
 		hal_info("%s: %s\n", __func__, averr(r).c_str());
+	if (mAudioFmt)
+	{
+		mAudioSeekReq = true;
+		mQueueCond.notify_all();
+	}
 	mWaitKey = true;
 	hal_info("%s: to %.3f s\n", __func__, (target - mFileStart) / 1e9);
 }
@@ -738,6 +820,7 @@ void cStarfishPlayer::demuxLoop()
 	for (AVPacket *pkt : mPreroll)
 		push(pkt->stream_index == mVideoIdx ? mVideoQ : mAudioQ, pkt);
 	mPreroll.clear();
+	bool sound = !mAudioFmt;
 
 	AVPacket *pkt = av_packet_alloc();
 	bool ended = false;
@@ -766,11 +849,15 @@ void cStarfishPlayer::demuxLoop()
 		{
 			if (!mStop)
 				hal_info("%s: %s\n", __func__, averr(r).c_str());
-			closeQueues();
+			if (sound)
+				closeQueues();
+			else
+				closeQueue(mVideoQ);
 			ended = true;
 			continue;
 		}
-		if (pkt->stream_index == mVideoIdx || pkt->stream_index == mAudioIdx)
+		pkt->time_base = mFmt->streams[pkt->stream_index]->time_base;
+		if (pkt->stream_index == mVideoIdx || (sound && pkt->stream_index == mAudioIdx))
 		{
 			if (mWaitKey)
 			{
@@ -781,7 +868,7 @@ void cStarfishPlayer::demuxLoop()
 				}
 				mWaitKey = false;
 			}
-			smoothJumps(pkt);
+			smoothJumps(pkt, pkt->stream_index == mVideoIdx ? 1 : 2);
 			int64_t pts = packetPts(pkt);
 			if (pts != AV_NOPTS_VALUE)
 				mDemuxPts = pts;
@@ -791,7 +878,101 @@ void cStarfishPlayer::demuxLoop()
 		av_packet_unref(pkt);
 	}
 	av_packet_free(&pkt);
-	closeQueues();
+	if (sound)
+		closeQueues();
+	else
+		closeQueue(mVideoQ);
+}
+
+bool cStarfishPlayer::reopenAudio()
+{
+	for (int tries = 0; tries < 5 && !mStop; tries++)
+	{
+		if (tries)
+			std::this_thread::sleep_for(1s);
+		AVFormatContext *fmt = NULL;
+		int r = openInput(fmt, mAudioUrl, mUserAgent, mHeaderFields);
+		if (r >= 0)
+			r = avformat_find_stream_info(fmt, NULL);
+		int idx = r >= 0 ? av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0) : r;
+		if (idx >= 0)
+		{
+			for (unsigned i = 0; i < fmt->nb_streams; i++)
+				fmt->streams[i]->discard = (int)i == idx ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+			avformat_close_input(&mAudioFmt);
+			mAudioFmt = fmt;
+			mAudioIdx = idx;
+			hal_info("%s: the sound is open again\n", __func__);
+			return true;
+		}
+		if (fmt)
+			avformat_close_input(&fmt);
+		hal_info("%s: %s\n", __func__, averr(idx).c_str());
+	}
+	return false;
+}
+
+/* the sound from a stream of its own, read beside the video */
+void cStarfishPlayer::audioDemuxLoop()
+{
+	for (AVPacket *pkt : mAudioPreroll)
+		push(mAudioQ, pkt);
+	mAudioPreroll.clear();
+
+	AVPacket *pkt = av_packet_alloc();
+	bool ended = false;
+	bool first = true;
+	while (!mStop)
+	{
+		if (mAudioSeekReq && !mSeekReq)
+		{
+			mAudioSeekReq = false;
+			int r = av_seek_frame(mAudioFmt, -1, av_rescale(mStartPts, AV_TIME_BASE, 1000000000), AVSEEK_FLAG_BACKWARD);
+			if (r < 0)
+				hal_info("%s: %s\n", __func__, averr(r).c_str());
+			ended = false;
+		}
+		if (ended || mSeekReq)
+		{
+			std::unique_lock<std::mutex> lk(mQueueLock);
+			mQueueCond.wait_for(lk, 200ms, [this] { return mStop || mAudioSeekReq; });
+			continue;
+		}
+		int r = av_read_frame(mAudioFmt, pkt);
+		if (r == AVERROR(EAGAIN))
+		{
+			std::this_thread::sleep_for(10ms);
+			continue;
+		}
+		if (r < 0)
+		{
+			if (!mStop)
+				hal_info("%s: %s\n", __func__, averr(r).c_str());
+			/* a live stream has no end: its sound is opened anew */
+			if (!mStop && mFmt->duration <= 0 && reopenAudio())
+				continue;
+			closeQueue(mAudioQ);
+			ended = true;
+			continue;
+		}
+		if (pkt->stream_index == mAudioIdx)
+		{
+			pkt->time_base = mAudioFmt->streams[mAudioIdx]->time_base;
+			if (first)
+			{
+				first = false;
+				int64_t t = packetPts(pkt);
+				if (t != AV_NOPTS_VALUE)
+					hal_info("%s: the sound starts %" PRId64 " ms from the picture\n", __func__, (t - mStartPts) / 1000000);
+			}
+			smoothJumps(pkt, 2);
+			mBytes += pkt->size;
+			push(mAudioQ, av_packet_clone(pkt));
+		}
+		av_packet_unref(pkt);
+	}
+	av_packet_free(&pkt);
+	closeQueue(mAudioQ);
 }
 
 bool cStarfishPlayer::feed(AVPacket *pkt, int esData)
@@ -957,11 +1138,12 @@ int cStarfishPlayer::bufferedMs()
 void cStarfishPlayer::audioTracks(std::vector<Track> &tracks)
 {
 	tracks.clear();
-	if (!mFmt)
+	AVFormatContext *fmt = mAudioFmt ? mAudioFmt : mFmt;
+	if (!fmt)
 		return;
-	for (unsigned i = 0; i < mFmt->nb_streams; i++)
+	for (unsigned i = 0; i < fmt->nb_streams; i++)
 	{
-		AVStream *s = mFmt->streams[i];
+		AVStream *s = fmt->streams[i];
 		if (s->codecpar->codec_type != AVMEDIA_TYPE_AUDIO)
 			continue;
 		Track t;

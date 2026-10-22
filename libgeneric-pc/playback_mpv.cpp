@@ -210,11 +210,11 @@ bool cPlayback::Start(char *filename, int /*vpid*/, int /*vtype*/, int apid, int
 	if (hwActive)
 		Stop();
 	/* the platform's decoder first; what it cannot take goes on through mpv */
-	if (hw && filename2.empty())
+	if (hw)
 	{
 		int err = 0;
 		bool growing = url.compare(0, 12, "appending://") == 0;
-		cHwPlayer::Result r = hw->start(growing ? url.substr(12) : url, userAgent, fields, err,
+		cHwPlayer::Result r = hw->start(growing ? url.substr(12) : url, filename2, userAgent, fields, err,
 						init_jump > 0 ? init_jump : 0, growing);
 		if (r == cHwPlayer::OK)
 		{

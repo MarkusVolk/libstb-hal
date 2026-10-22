@@ -19,6 +19,7 @@
 struct AVFormatContext;
 struct AVIOContext;
 struct AVPacket;
+struct AVStream;
 class StarfishMediaAPIs;
 
 /* ffmpeg demuxes, the TV decodes: the elementary streams go into one
@@ -31,8 +32,8 @@ class cStarfishPlayer : public cHwPlayer
 		~cStarfishPlayer() override;
 
 		void reset() override;
-		Result start(const std::string &url, const std::string &userAgent, const std::vector<std::string> &headerFields, int &error,
-			     int startMs, bool growing) override;
+		Result start(const std::string &url, const std::string &audioUrl, const std::string &userAgent,
+			     const std::vector<std::string> &headerFields, int &error, int startMs, bool growing) override;
 		void stop() override;
 		void abort() override;
 
@@ -71,12 +72,20 @@ class cStarfishPlayer : public cHwPlayer
 		std::string loadPayload(const std::string &videoCodec, const std::string &audioCodec);
 		int64_t packetPts(const AVPacket *pkt) const;
 		bool isJump(int64_t ns, int es) const;
-		void smoothJumps(AVPacket *pkt);
+		void smoothJumps(AVPacket *pkt, int es);
+		AVStream *audioStream() const;
+		int openInput(AVFormatContext *&fmt, const std::string &url, const std::string &userAgent,
+			      const std::vector<std::string> &headerFields);
 
 		void demuxLoop();
+		void audioDemuxLoop();
+		bool reopenAudio();
+		std::string mAudioUrl, mUserAgent;
+		std::vector<std::string> mHeaderFields;
 		void feedLoop(int esData);
 		bool feed(AVPacket *pkt, int esData);
 		void push(Queue &q, AVPacket *pkt);
+		void closeQueue(Queue &q);
 		void closeQueues();
 		void emptyQueues();
 
@@ -102,8 +111,10 @@ class cStarfishPlayer : public cHwPlayer
 		AVIOContext *mIo;
 
 		AVFormatContext *mFmt;
+		AVFormatContext *mAudioFmt;     /* the sound from a stream of its own, else NULL */
 		int mVideoIdx;
-		int mAudioIdx;
+		int mAudioIdx;                  /* in mAudioFmt where there is one */
+		std::atomic<bool> mAudioSeekReq;
 		bool mAdts;
 
 		StarfishMediaAPIs *mApi;
@@ -117,8 +128,10 @@ class cStarfishPlayer : public cHwPlayer
 		Queue mVideoQ;
 		Queue mAudioQ;
 		std::vector<AVPacket *> mPreroll;
+		std::vector<AVPacket *> mAudioPreroll;
 
 		std::thread mDemuxThread;
+		std::thread mAudioDemuxThread;
 		std::thread mVideoThread;
 		std::thread mAudioThread;
 };

@@ -29,10 +29,11 @@ class cHwPlayer
 		/* before every start(): forget an earlier abort */
 		virtual void reset() = 0;
 		/* blocks until the stream plays, or until it is clear the decoder
-		 * cannot take it (UNSUPPORTED, mpv plays it then); startMs: where
-		 * in a file to begin, growing: a recording that is still written */
-		virtual Result start(const std::string &url, const std::string &userAgent, const std::vector<std::string> &headerFields,
-				     int &error, int startMs, bool growing) = 0;
+		 * cannot take it (UNSUPPORTED, mpv plays it then); audioUrl: the
+		 * sound from a stream of its own, startMs: where in a file to
+		 * begin, growing: a recording that is still written */
+		virtual Result start(const std::string &url, const std::string &audioUrl, const std::string &userAgent,
+				     const std::vector<std::string> &headerFields, int &error, int startMs, bool growing) = 0;
 		virtual void stop() = 0;
 		/* from another thread: ends a start() that still opens */
 		virtual void abort() = 0;
