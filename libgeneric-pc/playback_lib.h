@@ -15,6 +15,7 @@ typedef enum
 
 struct AVFormatContext;
 class cMpvEngine;
+class cHwPlayer;
 
 class cPlayback
 {
@@ -22,6 +23,8 @@ class cPlayback
 	private:
 		static OpenThreads::Mutex mutex;
 		cMpvEngine *engine;
+		cHwPlayer *hw; /* the platform's own decoder, NULL without one */
+		bool hwActive; /* it plays what was started */
 		bool playing;
 		bool first;
 		int nPlaybackSpeed;

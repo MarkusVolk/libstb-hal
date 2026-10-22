@@ -29,6 +29,8 @@
 #include "playback_lib.h"
 #include "mpv_player.h"
 #include "hal_debug.h"
+#include "hw_player.h"
+#include "platform.h"
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_PLAYBACK, this, args)
@@ -42,6 +44,8 @@ cPlayback::cPlayback(int)
 {
 	hal_info("%s\n", __func__);
 	engine = cMpvEngine::getInstance();
+	hw = platform_player();
+	hwActive = false;
 	playing = false;
 	first = false;
 	nPlaybackSpeed = 0;
@@ -62,6 +66,7 @@ cPlayback::~cPlayback()
 {
 	hal_info("%s\n", __func__);
 	Close();
+	delete hw;
 	pthread_cond_destroy(&trick_cond);
 	pthread_mutex_destroy(&trick_lock);
 }
@@ -75,6 +80,8 @@ bool cPlayback::Open(playmode_t PlayMode)
 	last_size = 0;
 	init_jump = -1;
 	abort_gen = engine ? engine->abortGeneration() : 0;
+	if (hw)
+		hw->reset();
 	return engine != NULL;
 }
 
@@ -86,6 +93,15 @@ void cPlayback::Close(void)
 
 bool cPlayback::Stop(void)
 {
+	if (hwActive)
+	{
+		trickStop();
+		hw->stop();
+		hwActive = false;
+		playing = false;
+		nPlaybackSpeed = 0;
+		return true;
+	}
 	if (!engine)
 		return false;
 	trickStop();
@@ -191,6 +207,30 @@ bool cPlayback::Start(char *filename, int /*vpid*/, int /*vtype*/, int apid, int
 	}
 	parseHeaders(headers, fields, userAgent);
 
+	if (hwActive)
+		Stop();
+	/* the platform's decoder first; what it cannot take goes on through mpv */
+	if (hw && filename2.empty())
+	{
+		int err = 0;
+		bool growing = url.compare(0, 12, "appending://") == 0;
+		cHwPlayer::Result r = hw->start(growing ? url.substr(12) : url, userAgent, fields, err,
+						init_jump > 0 ? init_jump : 0, growing);
+		if (r == cHwPlayer::OK)
+		{
+			init_jump = -1;
+			hwActive = true;
+			playing = true;
+			first = true;
+			nPlaybackSpeed = 0;
+			mAudioStream = hw->audioTrack();
+			return true;
+		}
+		if (r == cHwPlayer::ABORTED)
+			return false;
+		hal_info("%s: %s, playing through mpv\n", __func__, r == cHwPlayer::UNSUPPORTED ? "not for the platform's decoder" : "the platform's decoder failed");
+	}
+
 	double start = (init_jump > 0) ? init_jump / 1000.0 : 0;
 	init_jump = -1;
 	playing = engine->load(url, fields, userAgent, filename2, start, abort_gen);
@@ -219,6 +259,8 @@ static int64_t trackForPid(cMpvEngine *engine, const char *type, int pid)
 bool cPlayback::SetAPid(int pid, bool /*ac3*/)
 {
 	hal_info("%s: %d\n", __func__, pid);
+	if (hwActive)
+		return pid == mAudioStream;
 	if (!engine)
 		return false;
 	int64_t id = trackForPid(engine, "audio", pid);
@@ -252,6 +294,26 @@ void cPlayback::SuspendSubtitle(bool suspend)
 bool cPlayback::SetSpeed(int speed)
 {
 	hal_info("%s: %d\n", __func__, speed);
+	if (hwActive)
+	{
+		bool ok = true;
+		if (speed == 0 || speed == 1)
+		{
+			trickStop();
+			hw->setTrick(false);
+			ok = hw->setPaused(speed == 0);
+		}
+		else
+		{
+			/* as with mpv, jump from keyframe to keyframe; the decoder
+			 * plays on without sound and shows where it lands */
+			hw->setPaused(false);
+			hw->setTrick(true);
+			trickStart(speed);
+		}
+		nPlaybackSpeed = speed;
+		return ok;
+	}
 	if (!engine || !playing)
 		return false;
 	if (speed == 0)
@@ -296,21 +358,38 @@ void *cPlayback::trickLoop(void *arg)
 		int speed = p->trick_speed;
 		pthread_mutex_unlock(&p->trick_lock);
 
-		double pos = 0, dur = 0;
-		p->engine->getDouble("time-pos", pos);
-		p->engine->getDouble("duration", dur);
-		double target = pos + speed * TRICK_INTERVAL_MS / 1000.0;
-		/* stop short of the end of a growing recording, and at its start */
-		if (dur > 0 && target > dur - 1.0)
-			target = dur - 1.0;
-		if (target < 0)
-			target = 0;
-		if (target != pos)
+		if (p->hwActive)
 		{
-			char buf[32];
-			snprintf(buf, sizeof(buf), "%.3f", target);
-			const char *cmd[] = { "seek", buf, "absolute+keyframes", NULL };
-			p->engine->command(cmd);
+			int position = 0, duration = 0;
+			if (p->GetPosition(position, duration))
+			{
+				int64_t target = position + speed * TRICK_INTERVAL_MS;
+				if (duration > 0 && target > duration - 1000)
+					target = duration - 1000;
+				if (target < 0)
+					target = 0;
+				if (target != position)
+					p->hw->seek(target, true);
+			}
+		}
+		else
+		{
+			double pos = 0, dur = 0;
+			p->engine->getDouble("time-pos", pos);
+			p->engine->getDouble("duration", dur);
+			double target = pos + speed * TRICK_INTERVAL_MS / 1000.0;
+			/* stop short of the end of a growing recording, and at its start */
+			if (dur > 0 && target > dur - 1.0)
+				target = dur - 1.0;
+			if (target < 0)
+				target = 0;
+			if (target != pos)
+			{
+				char buf[32];
+				snprintf(buf, sizeof(buf), "%.3f", target);
+				const char *cmd[] = { "seek", buf, "absolute+keyframes", NULL };
+				p->engine->command(cmd);
+			}
 		}
 		pthread_mutex_lock(&p->trick_lock);
 	}
@@ -351,6 +430,28 @@ bool cPlayback::GetSpeed(int &speed) const
 
 bool cPlayback::GetPosition(int &position, int &duration, bool isWebChannel)
 {
+	if (hwActive)
+	{
+		int64_t pos, dur;
+		if (!hw->position(pos, dur))
+			return false;
+		position = (int)pos;
+		duration = (int)dur;
+		/* a recording in progress: its duration from the file times, as
+		 * below for mpv */
+		struct stat64 st, sx;
+		if (pm == PLAYMODE_TS && !fn_ts.empty() && !stat64(fn_ts.c_str(), &st) && !stat64(fn_xml.c_str(), &sx))
+			duration = (st.st_mtime - sx.st_mtime) * 1000;
+		if (hw->eof())
+		{
+			if (!isWebChannel)
+				return false;
+			if (duration <= position)
+				duration = position + 1000;
+			position = duration - 1000;
+		}
+		return true;
+	}
 	if (!engine)
 		return false;
 
@@ -411,6 +512,8 @@ void cPlayback::GetPts(uint64_t &pts)
 bool cPlayback::SetPosition(int position, bool absolute)
 {
 	hal_info("%s: %d %s\n", __func__, position, absolute ? "absolute" : "relative");
+	if (hwActive)
+		return hw->seek(position, absolute);
 	if (!engine)
 		return false;
 	if (!playing)
@@ -449,6 +552,20 @@ static std::string trackLanguage(const cMpvEngine::Track &t)
 void cPlayback::FindAllPids(int *apids, unsigned int *ac3flags, unsigned int *numpida, std::string *language)
 {
 	*numpida = 0;
+	if (hwActive)
+	{
+		std::vector<cHwPlayer::Track> tracks;
+		hw->audioTracks(tracks);
+		unsigned int n = 0;
+		for (size_t i = 0; i < tracks.size() && n < MAX_TRACKS; i++, n++)
+		{
+			apids[n] = tracks[i].id;
+			ac3flags[n] = tracks[i].ac3flag;
+			language[n] = tracks[i].language;
+		}
+		*numpida = n;
+		return;
+	}
 	if (!engine)
 		return;
 	std::vector<cMpvEngine::Track> tracks;
@@ -551,17 +668,23 @@ bool cPlayback::SelectSubtitles(int pid, std::string charset)
 void cPlayback::RequestAbort(void)
 {
 	hal_info("%s\n", __func__);
+	if (hw)
+		hw->abort();
 	if (engine)
 		engine->abort();
 }
 
 bool cPlayback::IsPlaying(void)
 {
+	if (hwActive)
+		return playing && hw->isPlaying();
 	return playing && engine && engine->isLoaded();
 }
 
 uint64_t cPlayback::GetReadCount(void)
 {
+	if (hwActive)
+		return hw->readCount();
 	int64_t pos = 0;
 	if (engine && engine->getInt("stream-pos", pos) && pos > 0)
 		return (uint64_t)pos;
@@ -570,6 +693,8 @@ uint64_t cPlayback::GetReadCount(void)
 
 int cPlayback::GetBufferedMs(void)
 {
+	if (hwActive)
+		return hw->bufferedMs();
 	double d = 0;
 	if (!engine || !playing || !engine->getDouble("demuxer-cache-duration", d))
 		return 0;
@@ -631,6 +756,11 @@ void cPlayback::GetMetadata(std::vector<std::string> &keys, std::vector<std::str
 {
 	keys.clear();
 	values.clear();
+	if (hwActive)
+	{
+		hw->metadata(keys, values);
+		return;
+	}
 	if (!engine)
 		return;
 	std::map<std::string, std::string> meta;

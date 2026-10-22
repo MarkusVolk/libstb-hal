@@ -17,6 +17,7 @@
 #include <hardware_caps.h>
 #include "video_std.h"
 #include <sys/utsname.h>
+#include "platform.h"
 
 static int initialized = 0;
 static hw_caps_t caps;
@@ -67,6 +68,7 @@ hw_caps_t *get_hwcaps(void)
 	}
 	else
 		fprintf(stderr, "%s: uname() failed: %m\n", __func__);
+	platform_caps(&caps);
 
 	initialized = 1;
 	return &caps;

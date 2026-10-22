@@ -50,6 +50,7 @@ extern "C" {
 #include "mpv_player.h"
 #include "hal_debug.h"
 #include "hdmi_cec.h"
+#include "platform.h"
 
 #include <mpv/client.h>
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_VIDEO, this, args)
@@ -602,6 +603,8 @@ void cVideo::StopPicture()
 void cVideo::Standby(unsigned int bOn)
 {
 	hdmi_cec::getInstance()->SetCECState(bOn);
+	if (platform_standby(bOn))
+		return;
 	/* under a desktop the window has no business staying around in standby */
 	if (glfb_priv && (getenv("WAYLAND_DISPLAY") || getenv("DISPLAY")))
 		glfb_priv->setHidden(bOn);

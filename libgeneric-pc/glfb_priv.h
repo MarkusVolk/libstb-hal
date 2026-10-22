@@ -61,6 +61,14 @@ class GLFbPC
 			mState.blit = true;
 			wake();
 		};
+		/* the TV's media pipeline plays on the plane below the window:
+		 * the window is cleared transparent and only the OSD drawn */
+		void setExternalVideo(bool on)
+		{
+			mExternalVideo = on;
+			mState.blit = true;
+			wake();
+		};
 		fb_var_screeninfo getScreenInfo()
 		{
 			return si;
@@ -168,6 +176,8 @@ class GLFbPC
 		std::atomic<bool> mSuspendReq; /* suspend(): give the display away */
 		std::atomic<bool> mSuspended; /* the display is given away */
 		bool mOnPlane; /* the video that is playing is on the plane */
+		volatile bool mExternalVideo; /* the TV's pipeline plays on the plane below the window */
+		bool mPlatformInput; /* the platform reads the remote, SDL's keys stay unused */
 		int mDrmFd;
 		struct _drmModeAtomicReq *mPlaneReq; /* mpv adds the plane's properties here */
 		GLuint mPlaneFbo; /* mpv wants a target, only its size matters */

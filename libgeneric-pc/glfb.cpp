@@ -44,6 +44,7 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include "glfb_priv.h"
+#include "platform.h"
 #include "video_lib.h"
 #include "audio_lib.h"
 
@@ -211,6 +212,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mWinW = mWinH = 0;
 	mPlaneOK = false;
 	mOnPlane = false;
+	mExternalVideo = false;
+	mPlatformInput = false;
 	mDrmFd = -1;
 	mConnCheckNext = 0;
 	mEdidMissing = false;
@@ -401,17 +404,25 @@ bool GLFbPC::createDisplay()
 		hal_info("GLFB: SDL_Init failed: %s\n", SDL_GetError());
 		return false;
 	}
-	/* gamepads are opened as they show up, see pollEvents() */
-	if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD))
+	/* where the platform reads the remote itself, SDL's keys and gamepads
+	 * stay unused; else gamepads are opened as they show up, see pollEvents() */
+	mPlatformInput = platform_input_start([this](int code, int value) { sendKey(code, value); });
+	if (!mPlatformInput && !SDL_InitSubSystem(SDL_INIT_GAMEPAD))
 		hal_info("GLFB: no gamepad support: %s\n", SDL_GetError());
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-	SDL_WindowFlags flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
-	if (mFullscreen)
-		flags |= SDL_WINDOW_FULLSCREEN;
-	mWindow = SDL_CreateWindow("Neutrino", x, y, flags);
+	mWindow = platform_create_window(x, y);
+	if (mWindow)
+		mFullscreen = true;
+	else
+	{
+		SDL_WindowFlags flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+		if (mFullscreen)
+			flags |= SDL_WINDOW_FULLSCREEN;
+		mWindow = SDL_CreateWindow("Neutrino", x, y, flags);
+	}
 	if (!mWindow)
 	{
 		hal_info("GLFB: SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -480,6 +491,8 @@ void GLFbPC::releaseDisplay()
 	releaseGLObjects();
 	SDL_GL_DestroyContext(mContext);
 	mContext = NULL;
+	platform_input_stop();
+	platform_release_window();
 	SDL_DestroyWindow(mWindow);
 	mWindow = NULL;
 	mPadKey = 0;
@@ -544,6 +557,8 @@ void GLFramebuffer::run()
 		glfb_priv->teardownRender();
 		glfb_priv->releaseGLObjects();
 		SDL_GL_DestroyContext(glfb_priv->mContext);
+		platform_input_stop();
+		platform_release_window();
 		SDL_DestroyWindow(glfb_priv->mWindow);
 	}
 	SDL_Quit();
@@ -771,6 +786,8 @@ void GLFbPC::pollEvents()
 				padAxis(ev.gaxis.axis, ev.gaxis.value);
 				break;
 			case SDL_EVENT_KEY_DOWN:
+				if (mPlatformInput)
+					break;
 				if (mTermFd >= 0)
 					termKey(ev.key);
 				else if (!producesText(ev.key.key))
@@ -783,6 +800,8 @@ void GLFbPC::pollEvents()
 				break;
 			case SDL_EVENT_KEY_UP:
 			{
+				if (mPlatformInput)
+					break;
 				std::map<SDL_Scancode, int>::iterator h = mHeld.find(ev.key.scancode);
 				if (h != mHeld.end())
 				{
@@ -792,6 +811,8 @@ void GLFbPC::pollEvents()
 				break;
 			}
 			case SDL_EVENT_TEXT_INPUT:
+				if (mPlatformInput)
+					break;
 				if (mTermFd >= 0)
 				{
 					termText(ev.text.text);
@@ -1249,7 +1270,7 @@ void GLFbPC::render()
 
 	/* The video on the plane below the window: the GPU only draws the OSD,
 	 * and only when it has changed. */
-	const bool on_plane = mPlaneOK && vp.valid && vp.drmprime;
+	const bool on_plane = (mPlaneOK && vp.valid && vp.drmprime) || mExternalVideo;
 	if (on_plane != mOnPlane)
 	{
 		mOnPlane = on_plane;
