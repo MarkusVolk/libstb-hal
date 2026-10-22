@@ -337,6 +337,7 @@ bool cDvbPlayer::pickStreams()
 void cDvbPlayer::setupDecoders()
 {
 	/* keep the live picture until the first one of the stream */
+	videoDecoder->HoldPicture(true);
 	videoDecoder->Stop(false);
 	audioDecoder->Stop();
 	mVideoFd = videoDecoder->fd;
@@ -369,6 +370,7 @@ void cDvbPlayer::setupDecoders()
 
 void cDvbPlayer::releaseDecoders()
 {
+	videoDecoder->HoldPicture(false);
 	if (mVideoFd >= 0)
 	{
 		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
@@ -679,6 +681,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 
 	if (!waitFirstPicture())
 		hal_info("%s: no picture yet\n", __func__);
+	videoDecoder->HoldPicture(false);
 	if (mAbort)
 	{
 		stop();

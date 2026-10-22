@@ -35,6 +35,7 @@
 #include <linux/dvb/video.h>
 #include <linux/fb.h>
 #include "video_lib.h"
+#include "audio_lib.h"
 #include "hal_debug.h"
 #include "hdmi_cec.h"
 
@@ -81,6 +82,7 @@ enum
 };
 
 cVideo *videoDecoder = NULL;
+extern cAudio *audioDecoder;
 cVideo *pipVideoDecoder[3] = { NULL, NULL, NULL };
 
 int system_rev = 0;
@@ -566,6 +568,7 @@ cVideo::cVideo(int, void *, void *, unsigned int unit)
 	hue = -1;
 	video_standby = 0;
 	blank_mode = 0;
+	live_paused = false;
 	hw_caps_t *hwcaps = get_hwcaps();
 	if (unit > (unsigned int) hwcaps->pip_devs)
 	{
@@ -699,9 +702,56 @@ int cVideo::setCroppingMode(int /*vidDispMode_t format*/)
 #endif
 }
 
+void cVideo::HoldPicture(bool on)
+{
+	const char *zapmode = "/proc/stb/video/zapmode";
+	if (on && held_zapmode.empty())
+	{
+		char mode[32] = "";
+		if (proc_get(zapmode, mode, sizeof(mode)) <= 0)
+			return;
+		mode[strcspn(mode, "\n")] = 0;
+		held_zapmode = mode;
+		proc_put(zapmode, "hold", 4);
+	}
+	else if (!on && !held_zapmode.empty())
+	{
+		proc_put(zapmode, held_zapmode.c_str(), held_zapmode.size());
+		held_zapmode.clear();
+	}
+}
+
+/* the decoder does not freeze what comes from the demux, a stop that
+ * keeps the picture holds it */
+bool cVideo::LivePause(bool on)
+{
+	if (fd < 0 || live_paused == on)
+		return false;
+	if (on)
+	{
+		HoldPicture(true);
+		if (fop(ioctl, VIDEO_STOP, 0) < 0)
+		{
+			HoldPicture(false);
+			return false;
+		}
+		if (audioDecoder)
+			audioDecoder->Stop();
+		live_paused = true;
+		return true;
+	}
+	live_paused = false;
+	Start();
+	if (audioDecoder)
+		audioDecoder->Start();
+	return true;
+}
+
 int cVideo::Start(void * /*PcrChannel*/, unsigned short /*PcrPid*/, unsigned short /*VideoPid*/, void * /*hChannel*/)
 {
 	hal_debug("#%d: %s playstate=%d\n", devnum, __func__, playstate);
+	live_paused = false;
+	HoldPicture(false);
 #if 0
 	if (playstate == VIDEO_PLAYING)
 		return 0;
@@ -753,6 +803,10 @@ int cVideo::Stop(bool blank)
 		hal_debug("%s: stillpicture == true\n", __func__);
 		return -1;
 	}
+	/* a held live picture stays until the timeshift takes over */
+	if (live_paused)
+		blank = false;
+	live_paused = false;
 	playstate = blank ? VIDEO_STOPPED : VIDEO_FREEZED;
 	blank_mode = blank;
 	return fop(ioctl, VIDEO_STOP, blank ? 1 : 0);

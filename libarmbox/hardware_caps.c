@@ -52,6 +52,7 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.display_dev, "/dev/dbox/oled0");
 	caps.has_internal_mmc = 1;
 	caps.can_ofgwrite = 1;
+	caps.can_live_pause = 1;
 
 	caps.pip_devs = 0;
 	if (access("/dev/dvb/adapter0/video1", F_OK) != -1)

@@ -2,6 +2,7 @@
 #define __VIDEO_LIB_H__
 
 #include <linux/dvb/video.h>
+#include <string>
 #include "cs_types.h"
 #include "dmx_hal.h"
 
@@ -190,6 +191,8 @@ class cVideo
 		int scaler_sharpness;
 		int zapping_mode;
 		int blank_mode;
+		bool live_paused;
+		std::string held_zapmode;
 
 		/* used internally by dmx */
 		int64_t GetPTS(void);
@@ -262,9 +265,13 @@ class cVideo
 		int StopVBI(void) { return 0; };
 		void SetDemux(cDemux *dmx);
 		void SetHDMIColorimetry(HDMI_COLORIMETRY hdmi_colorimetry);
-		/* live TV is not held here, the timeshift takes that */
-		bool LivePause(bool) { return false; }
+		/* the decoder holds the live picture; nothing is buffered, the
+		 * timeshift goes on from there */
+		bool LivePause(bool on);
 		int LiveBufferedMs(void) { return 0; }
+		/* keep the picture shown over a change of the decoder's source,
+		 * whatever zap mode is set; off: the zap mode set again */
+		void HoldPicture(bool on);
 		bool GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get_video = true, bool get_osd = false, bool scale_to_video = false);
 };
 
