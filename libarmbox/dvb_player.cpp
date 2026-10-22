@@ -395,7 +395,7 @@ int64_t cDvbPlayer::pts90(const AVPacket *pkt, const AVStream *st) const
 	int64_t ts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
 	if (ts == AV_NOPTS_VALUE)
 		return -1;
-	return (av_rescale_q(ts, st->time_base, AVRational{1, 90000}) - mStart90) & 0x1ffffffffLL;
+	return av_rescale_q(ts, st->time_base, AVRational{1, 90000}) & 0x1ffffffffLL;
 }
 
 bool cDvbPlayer::videoPes(AVPacket *pkt, std::vector<uint8_t> &pes)
@@ -611,7 +611,7 @@ void cDvbPlayer::demuxLoop()
 	av_packet_free(&pkt);
 }
 
-uint64_t cDvbPlayer::pts()
+uint64_t cDvbPlayer::decoderPts()
 {
 	int64_t pts = 0;
 	if (mVideoFd >= 0 && ioctl(mVideoFd, VIDEO_GET_PTS, &pts) == 0 && pts > 0)
@@ -621,11 +621,19 @@ uint64_t cDvbPlayer::pts()
 	return 0;
 }
 
-bool cDvbPlayer::waitFirstPicture()
+uint64_t cDvbPlayer::pts()
+{
+	uint64_t pts = decoderPts();
+	return pts ? (pts - mStart90) & 0x1ffffffffLL : 0;
+}
+
+/* the decoder keeps the time of the live picture until it shows one of the stream */
+bool cDvbPlayer::waitFirstPicture(uint64_t livePts)
 {
 	for (int i = 0; i < 250 && !mStop && !mAbort; i++)
 	{
-		if (pts() > 0)
+		uint64_t pts = decoderPts();
+		if (pts && pts != livePts)
 			return true;
 		usleep(20000);
 	}
@@ -684,6 +692,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 		av_seek_frame(mFmt, -1, start + (int64_t)startMs * 1000, AVSEEK_FLAG_BACKWARD);
 	}
 
+	uint64_t livePts = videoDecoder->GetPTS();
 	setupDecoders();
 	mVideoGen = mAudioGen = mGen;
 	mDemuxThread = std::thread(&cDvbPlayer::demuxLoop, this);
@@ -692,7 +701,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, mAudioFd, std::ref(mAudioQ), std::ref(mAudioGen));
 	mPlaying = true;
 
-	if (!waitFirstPicture())
+	if (!waitFirstPicture(livePts))
 		hal_info("%s: no picture yet\n", __func__);
 	videoDecoder->HoldPicture(false);
 	if (mAbort)

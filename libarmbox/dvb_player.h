@@ -76,7 +76,8 @@ class cDvbPlayer : public cHwPlayer
 		bool audioPes(AVPacket *pkt, std::vector<uint8_t> &pes);
 		int64_t pts90(const AVPacket *pkt, const AVStream *st) const;
 		void push(Queue &q, std::vector<uint8_t> &pes);
-		bool waitFirstPicture();
+		uint64_t decoderPts();
+		bool waitFirstPicture(uint64_t livePts);
 
 		std::atomic<bool> mAbort;
 		std::atomic<bool> mStop;
@@ -100,7 +101,7 @@ class cDvbPlayer : public cHwPlayer
 		int mAudioType;                   /* AUDIO_SET_BYPASS_MODE */
 		bool mAdts;
 		bool mSpsSeen;
-		int64_t mStart90;                 /* the start of the stream */
+		int64_t mStart90;                 /* the start of the stream, the decoder gets its own times */
 		int mVideoFd;
 		int mAudioFd;
 		int mVideoFlags;
