@@ -28,6 +28,7 @@ inline void cs_api_exit()
      && !BOXMODEL_HD60 \
      && !BOXMODEL_MULTIBOX \
      && !BOXMODEL_MULTIBOXSE \
+     && !BOXMODEL_OSMINI4K \
      && !BOXMODEL_OSMIO4K \
      && !BOXMODEL_OSMIO4KPLUS \
     )
