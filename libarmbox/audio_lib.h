@@ -25,6 +25,7 @@ class mixerVolume;
 class cAudio
 {
 		friend class cPlayback;
+		friend class cDvbPlayer;
 	private:
 		int fd;
 		bool fdd;

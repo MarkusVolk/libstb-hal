@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #include <sstream>
 
@@ -22,6 +23,7 @@ extern "C" {
 }
 
 #include "playback_libeplayer3.h"
+#include "dvb_player.h"
 #include "hal_debug.h"
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
@@ -42,14 +44,9 @@ bool cPlayback::Open(playmode_t PlayMode)
 		"PLAYMODE_FILE"
 	};
 
-	if (PlayMode != PLAYMODE_TS)
-	{
-		audioDecoder->closeDevice();
-		videoDecoder->closeDevice();
-		decoders_closed = true;
-	}
-
 	pm = PlayMode;
+	if (hw)
+		hw->reset();
 	got_vpts_ts = false;
 	vpts_ts = 0;
 	fn_ts = "";
@@ -90,8 +87,9 @@ void cPlayback::Close(void)
 	hal_info("%s\n", __func__);
 
 	//Dagobert: movieplayer does not call stop, it calls close ;)
+	trickStop();
 	mutex.lock();
-	if (playing)
+	if (playing || hwActive)
 		Stop();
 	mutex.unlock();
 
@@ -187,6 +185,58 @@ bool cPlayback::Start(char *filename, int vpid, int vtype, int apid, int ac3, in
 	{
 		const char hkey[] = "headers";
 		ffmpeg_av_dict_set(hkey, "", 0);
+	}
+
+	if (hwActive)
+		Stop();
+	if (hw)
+	{
+		std::vector<std::string> fields;
+		std::string userAgent;
+		std::istringstream lines(headers);
+		std::string line;
+		while (std::getline(lines, line))
+		{
+			if (!line.empty() && line.back() == '\r')
+				line.pop_back();
+			if (line.compare(0, 11, "User-Agent:") == 0)
+			{
+				size_t v = line.find_first_not_of(" ", 11);
+				if (v != std::string::npos)
+					userAgent = line.substr(v);
+			}
+			else if (!line.empty())
+				fields.push_back(line);
+		}
+		int err = 0;
+		hw->wantAudio(apid > 0 ? apid : -1);
+		cHwPlayer::Result r = hw->start(file, filename2, userAgent, fields, err, init_jump > 0 ? init_jump : 0,
+						pm == PLAYMODE_TS && !fn_ts.empty());
+		if (r == cHwPlayer::OK)
+		{
+			init_jump = -1;
+			hwActive = true;
+			playing = true;
+			first = false;
+			mAudioStream = hw->audioTrack();
+			/* like libeplayer3, a file waits for SetSpeed(), a stream plays */
+			nPlaybackSpeed = 1;
+			if (!isHTTP)
+			{
+				hw->setPaused(true);
+				nPlaybackSpeed = 0;
+			}
+			return true;
+		}
+		if (r == cHwPlayer::ABORTED)
+			return false;
+		hal_info("%s: %s, playing through libeplayer3\n", __func__, r == cHwPlayer::UNSUPPORTED ? "not for the box's decoders" : "the box's decoders failed");
+	}
+	if (pm != PLAYMODE_TS && !decoders_closed)
+	{
+		audioDecoder->closeDevice();
+		videoDecoder->closeDevice();
+		decoders_closed = true;
 	}
 
 	std::string szSecondFile;
@@ -305,6 +355,20 @@ bool cPlayback::Stop(void)
 {
 	hal_info("%s playing %d\n", __func__, playing);
 
+	if (hwActive)
+	{
+		hw->stop();
+		hwActive = false;
+		playing = false;
+		if (player && player->output)
+		{
+			player->output->Command(player, OUTPUT_DEL, (void *)"audio");
+			player->output->Command(player, OUTPUT_DEL, (void *)"video");
+			player->output->Command(player, OUTPUT_DEL, (void *)"subtitle");
+		}
+		return true;
+	}
+
 	if (player && player->playback)
 		player->playback->Command(player, PLAYBACK_STOP, NULL);
 
@@ -334,6 +398,8 @@ bool cPlayback::SetAPid(int pid, bool /* ac3 */)
 	hal_info("%s\n", __func__);
 	int i = pid;
 
+	if (hwActive)
+		return pid == mAudioStream;
 	if (pid != mAudioStream)
 	{
 		if (player && player->playback)
@@ -381,6 +447,27 @@ bool cPlayback::SetTeletextPid(int pid)
 bool cPlayback::SetSpeed(int speed)
 {
 	hal_info("%s playing %d speed %d\n", __func__, playing, speed);
+
+	if (hwActive)
+	{
+		bool ok = true;
+		if (speed == 0 || speed == 1)
+		{
+			trickStop();
+			hw->setTrick(false);
+			ok = hw->setPaused(speed == 0);
+		}
+		else
+		{
+			/* jump from keyframe to keyframe; the decoder plays on without
+			 * sound and shows where it lands */
+			hw->setPaused(false);
+			hw->setTrick(true);
+			trickStart(speed);
+		}
+		nPlaybackSpeed = speed;
+		return ok;
+	}
 
 	if (!decoders_closed)
 	{
@@ -461,6 +548,68 @@ bool cPlayback::SetSpeed(int speed)
 	return true;
 }
 
+#define TRICK_INTERVAL_MS 500
+
+void *cPlayback::trickLoop(void *arg)
+{
+	cPlayback *p = (cPlayback *)arg;
+	pthread_mutex_lock(&p->trick_lock);
+	while (p->trick_active)
+	{
+		struct timespec ts;
+		clock_gettime(CLOCK_REALTIME, &ts);
+		ts.tv_nsec += TRICK_INTERVAL_MS * 1000000L;
+		ts.tv_sec += ts.tv_nsec / 1000000000L;
+		ts.tv_nsec %= 1000000000L;
+		pthread_cond_timedwait(&p->trick_cond, &p->trick_lock, &ts);
+		if (!p->trick_active)
+			break;
+		int speed = p->trick_speed;
+		pthread_mutex_unlock(&p->trick_lock);
+
+		int position = 0, duration = 0;
+		if (p->hwActive && p->GetPosition(position, duration))
+		{
+			int64_t target = position + speed * TRICK_INTERVAL_MS;
+			/* stop short of the end of a growing recording, and at its start */
+			if (duration > 0 && target > duration - 1000)
+				target = duration - 1000;
+			if (target < 0)
+				target = 0;
+			if (target != position)
+				p->hw->seek(target, true);
+		}
+		pthread_mutex_lock(&p->trick_lock);
+	}
+	pthread_mutex_unlock(&p->trick_lock);
+	return NULL;
+}
+
+void cPlayback::trickStart(int speed)
+{
+	pthread_mutex_lock(&trick_lock);
+	trick_speed = speed;
+	bool running = trick_active;
+	trick_active = true;
+	pthread_mutex_unlock(&trick_lock);
+	if (!running && pthread_create(&trick_thread, NULL, trickLoop, this) != 0)
+	{
+		hal_info("%s: no thread for fast forward and rewind\n", __func__);
+		trick_active = false;
+	}
+}
+
+void cPlayback::trickStop(void)
+{
+	pthread_mutex_lock(&trick_lock);
+	bool running = trick_active;
+	trick_active = false;
+	pthread_cond_signal(&trick_cond);
+	pthread_mutex_unlock(&trick_lock);
+	if (running)
+		pthread_join(trick_thread, NULL);
+}
+
 bool cPlayback::GetSpeed(int &speed) const
 {
 	hal_debug("%s\n", __func__);
@@ -470,6 +619,11 @@ bool cPlayback::GetSpeed(int &speed) const
 
 void cPlayback::GetPts(uint64_t &pts)
 {
+	if (hwActive)
+	{
+		pts = hw->pts();
+		return;
+	}
 	if (player && player->playback)
 		player->playback->Command(player, PLAYBACK_PTS, (void *)&pts);
 }
@@ -479,6 +633,28 @@ bool cPlayback::GetPosition(int &position, int &duration, bool isWebChannel)
 {
 	bool got_duration = false;
 	hal_debug("%s %d %d\n", __func__, position, duration);
+
+	if (hwActive)
+	{
+		int64_t pos, dur;
+		if (!hw->position(pos, dur))
+			return false;
+		position = (int)pos;
+		duration = (int)dur;
+		/* a recording in progress: its duration from the file times */
+		struct stat64 st, sx;
+		if (pm == PLAYMODE_TS && !fn_ts.empty() && !stat64(fn_ts.c_str(), &st) && !stat64(fn_xml.c_str(), &sx))
+			duration = (st.st_mtime - sx.st_mtime) * 1000;
+		if (hw->eof())
+		{
+			if (!isWebChannel)
+				return false;
+			if (duration <= position)
+				duration = position + 1000;
+			position = duration - 1000;
+		}
+		return true;
+	}
 
 	/* hack: if the file is growing (timeshift), then determine its length
 	 * by comparing the mtime with the mtime of the xml file */
@@ -574,6 +750,9 @@ bool cPlayback::SetPosition(int position, bool absolute)
 		return false;
 	}
 
+	if (hwActive)
+		return hw->seek(position, absolute);
+
 	if (playing && first)
 	{
 		/* the calling sequence is:
@@ -601,6 +780,20 @@ void cPlayback::FindAllPids(uint16_t *apids, unsigned short *ac3flags, uint16_t 
 	const int max_numpida = 40;//MAX_PLAYBACK_PIDS defined in neutrino movieplayer.h
 	*numpida = 0;
 
+	if (hwActive)
+	{
+		std::vector<cHwPlayer::Track> tracks;
+		hw->audioTracks(tracks);
+		for (size_t j = 0; j < tracks.size() && j < (size_t)max_numpida; j++)
+		{
+			apids[j] = tracks[j].id;
+			ac3flags[j] = tracks[j].ac3flag;
+			language[j] = tracks[j].language;
+			*numpida = j + 1;
+		}
+		return;
+	}
+
 	if (player && player->playback && player->playback->isPlaying && player->manager && player->manager->audio)
 	{
 		char **TrackList = NULL;
@@ -622,7 +815,7 @@ void cPlayback::FindAllPids(uint16_t *apids, unsigned short *ac3flags, uint16_t 
 						// atUnknown, atMPEG, atMP3, atAC3, atDTS, atAAC, atPCM, atOGG, atFLAC
 						if (!strncmp("A_MPEG/L3", TrackList[i + 1], 9))
 							ac3flags[j] = 3;
-						if (!strncmp("A_MP3", TrackList[i + 1], 5))
+						else if (!strncmp("A_MP3", TrackList[i + 1], 5))
 							ac3flags[j] = 4;
 						else if (!strncmp("A_AC3", TrackList[i + 1], 5))
 							ac3flags[j] = 1;
@@ -666,6 +859,8 @@ void cPlayback::FindAllSubtitlePids(int *pids, unsigned int *numpids, std::strin
 
 	int max_numpids = *numpids;
 	*numpids = 0;
+	if (hwActive)
+		return;
 
 	if (player && player->manager && player->manager->subtitle)
 	{
@@ -790,6 +985,8 @@ void cPlayback::GetChapters(std::vector<int> &positions, std::vector<std::string
 	positions.clear();
 	titles.clear();
 
+	if (hwActive)
+		return;
 	if (player && player->manager && player->manager->chapter)
 	{
 		char **TrackList = NULL;
@@ -828,6 +1025,11 @@ void cPlayback::GetMetadata(std::vector<std::string> &keys, std::vector<std::str
 {
 	keys.clear();
 	values.clear();
+	if (hwActive)
+	{
+		hw->metadata(keys, values);
+		return;
+	}
 	char **metadata = NULL;
 	if (player && player->playback)
 	{
@@ -853,6 +1055,12 @@ cPlayback::cPlayback(int num __attribute__((unused)))
 	decoders_closed = false;
 	first = false;
 	player = NULL;
+	hw = new cDvbPlayer();
+	hwActive = false;
+	trick_active = false;
+	trick_speed = 0;
+	pthread_mutex_init(&trick_lock, NULL);
+	pthread_cond_init(&trick_cond, NULL);
 }
 
 cPlayback::~cPlayback()
@@ -860,17 +1068,25 @@ cPlayback::~cPlayback()
 	hal_info("%s\n", __func__);
 
 	RequestAbort();
+	trickStop();
 	mutex.lock();
+	if (hwActive)
+		Stop();
 	if (player)
 	{
 		free(player);
 		player = NULL;
 	}
 	mutex.unlock();
+	delete hw;
+	pthread_cond_destroy(&trick_cond);
+	pthread_mutex_destroy(&trick_lock);
 }
 
 void cPlayback::RequestAbort()
 {
+	if (hw)
+		hw->abort();
 	if (player && player->playback)
 	{
 		hal_info("%s\n", __func__);
@@ -893,6 +1109,8 @@ void cPlayback::RequestAbort()
 
 bool cPlayback::IsPlaying()
 {
+	if (hwActive)
+		return playing && hw->isPlaying();
 	if (player && player->playback)
 		return player->playback->isPlaying;
 	return false;
@@ -900,6 +1118,8 @@ bool cPlayback::IsPlaying()
 
 uint64_t cPlayback::GetReadCount()
 {
+	if (hwActive)
+		return hw->readCount();
 	if (player && player->playback)
 	{
 		return player->playback->readCount;

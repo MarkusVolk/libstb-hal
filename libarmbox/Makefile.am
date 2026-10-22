@@ -15,7 +15,10 @@ AM_CPPFLAGS = -D__STDC_FORMAT_MACROS -D__STDC_CONSTANT_MACROS -D_FILE_OFFSET_BIT
 AM_CPPFLAGS += \
 	-I$(top_srcdir)/common \
 	-I$(top_srcdir)/include \
-	-I$(top_srcdir)/libeplayer3/include
+	-I$(top_srcdir)/libeplayer3/include \
+	@AVFORMAT_CFLAGS@ \
+	@AVCODEC_CFLAGS@ \
+	@AVUTIL_CFLAGS@
 
 AM_CXXFLAGS = -fno-rtti -fno-exceptions -fno-strict-aliasing
 
@@ -36,4 +39,5 @@ libarmbox_la_SOURCES = \
 	init.cpp \
 	record.cpp \
 	hdmi_cec.cpp \
+	dvb_player.cpp \
 	playback_libeplayer3.cpp

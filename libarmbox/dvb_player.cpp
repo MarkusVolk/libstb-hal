@@ -1,0 +1,815 @@
+/*
+ * Playback through the box's own decoders: ffmpeg demuxes, the
+ * elementary streams go as PES into the video and audio devices
+ *
+ * Copyright (C) 2026 Markus Volk
+ *
+ * License: GPL-2.0-or-later
+ */
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <linux/dvb/audio.h>
+#include <linux/dvb/video.h>
+
+#ifndef AUDIO_GET_PTS
+#define AUDIO_GET_PTS _IOR('o', 19, __u64)
+#endif
+
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavutil/time.h>
+}
+
+#include "dvb_player.h"
+#include "audio_lib.h"
+#include "video_lib.h"
+#include "hal_debug.h"
+
+#define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
+#define hal_info(args...)  _hal_info(HAL_DEBUG_PLAYBACK, this, args)
+
+extern cAudio *audioDecoder;
+extern cVideo *videoDecoder;
+
+namespace
+{
+
+/* VIDEO_SET_STREAMTYPE and AUDIO_SET_BYPASS_MODE of this decoder */
+enum
+{
+	STREAM_MPEG2 = 0,
+	STREAM_H264 = 1,
+	STREAM_MPEG1 = 6,
+	STREAM_H265 = 7,
+	STREAM_H265_ALT = 22,
+	BYPASS_AC3 = 0,
+	BYPASS_MPEG = 0xa,
+	BYPASS_AAC_ADTS = 0xb,
+	BYPASS_EAC3 = 0x22,
+	BYPASS_EAC3_ALT = 7
+};
+
+const uint8_t PES_VIDEO = 0xe0;
+const uint8_t PES_AUDIO = 0xc0;
+/* the picture start the decoder looks for after the PES header of H.264 and H.265 */
+const uint8_t FAKE_START_CODE = 0x31;
+
+const size_t VIDEO_QUEUE_BYTES = 4 << 20;
+const size_t AUDIO_QUEUE_BYTES = 1 << 20;
+/* how long the end of a recording that is still written waits for more */
+const int GROW_WAIT_MS = 3000;
+
+void pesHeader(std::vector<uint8_t> &out, int size, uint8_t streamId, int64_t pts, bool fakeStart)
+{
+	int len = 0;
+	if (size > 0)
+	{
+		len = size + 3 + (pts >= 0 ? 5 : 0) + (fakeStart ? 5 : 0);
+		if (len > 65535)
+			len = 0;
+	}
+	out.push_back(0x00);
+	out.push_back(0x00);
+	out.push_back(0x01);
+	out.push_back(streamId);
+	out.push_back((len >> 8) & 0xff);
+	out.push_back(len & 0xff);
+	out.push_back(0x80);
+	out.push_back(pts >= 0 ? 0x80 : 0x00);
+	out.push_back(pts >= 0 ? 5 : 0);
+	if (pts >= 0)
+	{
+		out.push_back(0x21 | ((pts >> 29) & 0x0e));
+		out.push_back((pts >> 22) & 0xff);
+		out.push_back(0x01 | ((pts >> 14) & 0xfe));
+		out.push_back((pts >> 7) & 0xff);
+		out.push_back(0x01 | ((pts << 1) & 0xfe));
+	}
+	if (fakeStart)
+	{
+		out.push_back(0x00);
+		out.push_back(0x00);
+		out.push_back(0x01);
+		out.push_back(FAKE_START_CODE);
+		out.push_back(0x00);
+	}
+}
+
+/* a NAL unit of the given type (H.264) or of a parameter set (H.265) behind a start code */
+bool hasParameterSet(const uint8_t *d, int len, bool hevc)
+{
+	for (int i = 0; i + 3 < len && i < 256; i++)
+	{
+		if (d[i] || d[i + 1] || d[i + 2] != 1)
+			continue;
+		uint8_t nal = d[i + 3];
+		if (hevc ? ((nal >> 1) & 0x3f) == 32 : (nal & 0x1f) == 7)
+			return true;
+	}
+	return false;
+}
+
+int adtsRateIndex(int rate)
+{
+	static const int rates[] = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350 };
+	for (int i = 0; i < 13; i++)
+		if (rates[i] == rate)
+			return i;
+	return 3;
+}
+
+int trackId(const AVStream *st)
+{
+	return st->id > 0 ? st->id : st->index;
+}
+
+int ac3flag(enum AVCodecID id)
+{
+	switch (id)
+	{
+		case AV_CODEC_ID_AC3: return 1;
+		case AV_CODEC_ID_MP2: return 3;
+		case AV_CODEC_ID_MP3: return 4;
+		case AV_CODEC_ID_AAC: return 5;
+		case AV_CODEC_ID_DTS: return 6;
+		case AV_CODEC_ID_EAC3: return 7;
+		default: return 0;
+	}
+}
+
+int bypassFor(enum AVCodecID id)
+{
+	switch (id)
+	{
+		case AV_CODEC_ID_AC3: return BYPASS_AC3;
+		case AV_CODEC_ID_EAC3: return BYPASS_EAC3;
+		case AV_CODEC_ID_MP2:
+		case AV_CODEC_ID_MP3: return BYPASS_MPEG;
+		case AV_CODEC_ID_AAC: return BYPASS_AAC_ADTS;
+		default: return -1;
+	}
+}
+
+int streamTypeFor(enum AVCodecID id)
+{
+	switch (id)
+	{
+		case AV_CODEC_ID_H264: return STREAM_H264;
+		case AV_CODEC_ID_HEVC: return STREAM_H265;
+		case AV_CODEC_ID_MPEG2VIDEO: return STREAM_MPEG2;
+		case AV_CODEC_ID_MPEG1VIDEO: return STREAM_MPEG1;
+		default: return -1;
+	}
+}
+
+} /* namespace */
+
+cDvbPlayer::cDvbPlayer()
+	: mAbort(false), mStop(false), mPlaying(false), mEof(false), mPaused(false), mTrick(false),
+	  mBytes(0), mSeekReq(false), mSeekTarget(0), mGrowing(false), mDemuxDone(false), mFd(-1),
+	  mIo(NULL), mFmt(NULL), mVideoIdx(-1), mAudioIdx(-1), mAudioId(-1), mWantAudio(-1),
+	  mVideoType(-1), mAudioType(-1), mAdts(false), mSpsSeen(false), mStart90(0),
+	  mVideoFd(-1), mAudioFd(-1), mVideoFlags(0), mAudioFlags(0), mGen(0), mVideoGen(0), mAudioGen(0)
+{
+	mVideoQ.limit = VIDEO_QUEUE_BYTES;
+	mAudioQ.limit = AUDIO_QUEUE_BYTES;
+}
+
+cDvbPlayer::~cDvbPlayer()
+{
+	stop();
+}
+
+void cDvbPlayer::reset()
+{
+	mAbort = false;
+}
+
+void cDvbPlayer::abort()
+{
+	mAbort = true;
+	mQueueCond.notify_all();
+}
+
+int cDvbPlayer::interruptCb(void *opaque)
+{
+	cDvbPlayer *p = (cDvbPlayer *)opaque;
+	return p->mAbort || p->mStop;
+}
+
+int cDvbPlayer::ioRead(void *opaque, uint8_t *buf, int size)
+{
+	cDvbPlayer *p = (cDvbPlayer *)opaque;
+	int waited = 0;
+	for (;;)
+	{
+		ssize_t n = read(p->mFd, buf, size);
+		if (n > 0)
+			return (int)n;
+		if (n < 0 && errno != EINTR)
+			return AVERROR(errno);
+		/* the end of a recording that is still written: wait for it to grow */
+		if (!p->mGrowing || p->mAbort || p->mStop || p->mSeekReq || waited >= GROW_WAIT_MS)
+			return AVERROR_EOF;
+		usleep(50000);
+		waited += 50;
+	}
+}
+
+int64_t cDvbPlayer::ioSeek(void *opaque, int64_t offset, int whence)
+{
+	cDvbPlayer *p = (cDvbPlayer *)opaque;
+	if (whence == AVSEEK_SIZE)
+	{
+		struct stat64 st;
+		return fstat64(p->mFd, &st) ? -1 : st.st_size;
+	}
+	return lseek64(p->mFd, offset, whence & ~AVSEEK_FORCE);
+}
+
+int cDvbPlayer::openInput(const std::string &url, const std::string &userAgent, const std::vector<std::string> &headerFields)
+{
+	std::string path;
+	if (url.compare(0, 7, "file://") == 0)
+		path = url.substr(7);
+	else if (!url.empty() && url[0] == '/')
+		path = url;
+
+	mFmt = avformat_alloc_context();
+	if (!mFmt)
+		return AVERROR(ENOMEM);
+	mFmt->interrupt_callback.callback = interruptCb;
+	mFmt->interrupt_callback.opaque = this;
+
+	AVDictionary *opts = NULL;
+	if (!path.empty())
+	{
+		mFd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+		if (mFd < 0)
+			return AVERROR(errno);
+		const int size = 64 * 1024;
+		uint8_t *buf = (uint8_t *)av_malloc(size);
+		mIo = avio_alloc_context(buf, size, 0, this, ioRead, NULL, ioSeek);
+		if (!mIo)
+			return AVERROR(ENOMEM);
+		mFmt->pb = mIo;
+		/* a recording just begun is short, do not wait for more to analyse */
+		mFmt->probesize = 1 << 20;
+		mFmt->max_analyze_duration = AV_TIME_BASE;
+	}
+	else
+	{
+		if (!userAgent.empty())
+			av_dict_set(&opts, "user_agent", userAgent.c_str(), 0);
+		std::string headers;
+		for (size_t i = 0; i < headerFields.size(); i++)
+			headers += headerFields[i] + "\r\n";
+		if (!headers.empty())
+			av_dict_set(&opts, "headers", headers.c_str(), 0);
+	}
+
+	int ret = avformat_open_input(&mFmt, path.empty() ? url.c_str() : path.c_str(), NULL, &opts);
+	av_dict_free(&opts);
+	if (ret < 0)
+		return ret;
+	return avformat_find_stream_info(mFmt, NULL);
+}
+
+bool cDvbPlayer::pickStreams()
+{
+	const char *name = mFmt->iformat ? mFmt->iformat->name : "";
+	if (strcmp(name, "mpegts") && strcmp(name, "hls"))
+	{
+		hal_info("%s: container %s goes on to the fallback\n", __func__, name);
+		return false;
+	}
+
+	mVideoIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+	if (mVideoIdx < 0)
+		return false;
+	enum AVCodecID vcodec = mFmt->streams[mVideoIdx]->codecpar->codec_id;
+	mVideoType = streamTypeFor(vcodec);
+	if (mVideoType < 0)
+	{
+		hal_info("%s: video %s goes on to the fallback\n", __func__, avcodec_get_name(vcodec));
+		return false;
+	}
+
+	mAudioIdx = -1;
+	for (unsigned i = 0; i < mFmt->nb_streams; i++)
+	{
+		AVStream *st = mFmt->streams[i];
+		if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && trackId(st) == mWantAudio)
+			mAudioIdx = i;
+	}
+	if (mAudioIdx < 0)
+		mAudioIdx = av_find_best_stream(mFmt, AVMEDIA_TYPE_AUDIO, -1, mVideoIdx, NULL, 0);
+	if (mAudioIdx >= 0)
+	{
+		enum AVCodecID acodec = mFmt->streams[mAudioIdx]->codecpar->codec_id;
+		mAudioType = bypassFor(acodec);
+		if (mAudioType < 0)
+		{
+			hal_info("%s: audio %s goes on to the fallback\n", __func__, avcodec_get_name(acodec));
+			return false;
+		}
+		mAudioId = trackId(mFmt->streams[mAudioIdx]);
+	}
+	for (unsigned i = 0; i < mFmt->nb_streams; i++)
+		if ((int)i != mVideoIdx && (int)i != mAudioIdx)
+			mFmt->streams[i]->discard = AVDISCARD_ALL;
+
+	mStart90 = mFmt->start_time != AV_NOPTS_VALUE ? av_rescale(mFmt->start_time, 90000, AV_TIME_BASE) : 0;
+	hal_info("%s: %s, video %s, audio %s\n", __func__, name, avcodec_get_name(vcodec),
+		 mAudioIdx >= 0 ? avcodec_get_name(mFmt->streams[mAudioIdx]->codecpar->codec_id) : "none");
+	return true;
+}
+
+void cDvbPlayer::setupDecoders()
+{
+	/* keep the live picture until the first one of the stream */
+	videoDecoder->Stop(false);
+	audioDecoder->Stop();
+	mVideoFd = videoDecoder->fd;
+	mAudioFd = audioDecoder->fd;
+
+	if (mVideoFd >= 0)
+	{
+		mVideoFlags = fcntl(mVideoFd, F_GETFL);
+		fcntl(mVideoFd, F_SETFL, mVideoFlags | O_NONBLOCK);
+		ioctl(mVideoFd, VIDEO_SELECT_SOURCE, VIDEO_SOURCE_MEMORY);
+		if (ioctl(mVideoFd, VIDEO_SET_STREAMTYPE, mVideoType) < 0 && mVideoType == STREAM_H265)
+			ioctl(mVideoFd, VIDEO_SET_STREAMTYPE, STREAM_H265_ALT);
+		ioctl(mVideoFd, VIDEO_PLAY);
+		ioctl(mVideoFd, VIDEO_CONTINUE);
+		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
+	}
+	if (mAudioFd >= 0 && mAudioIdx >= 0)
+	{
+		mAudioFlags = fcntl(mAudioFd, F_GETFL);
+		fcntl(mAudioFd, F_SETFL, mAudioFlags | O_NONBLOCK);
+		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+		ioctl(mAudioFd, AUDIO_SELECT_SOURCE, AUDIO_SOURCE_MEMORY);
+		if (ioctl(mAudioFd, AUDIO_SET_BYPASS_MODE, mAudioType) < 0 && mAudioType == BYPASS_EAC3)
+			ioctl(mAudioFd, AUDIO_SET_BYPASS_MODE, BYPASS_EAC3_ALT);
+		ioctl(mAudioFd, AUDIO_SET_AV_SYNC, 1);
+		ioctl(mAudioFd, AUDIO_PLAY);
+		ioctl(mAudioFd, AUDIO_CONTINUE);
+	}
+}
+
+void cDvbPlayer::releaseDecoders()
+{
+	if (mVideoFd >= 0)
+	{
+		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
+		ioctl(mVideoFd, VIDEO_STOP, 0);
+		ioctl(mVideoFd, VIDEO_SLOWMOTION, 0);
+		ioctl(mVideoFd, VIDEO_FAST_FORWARD, 0);
+		ioctl(mVideoFd, VIDEO_SELECT_SOURCE, VIDEO_SOURCE_DEMUX);
+		fcntl(mVideoFd, F_SETFL, mVideoFlags);
+	}
+	if (mAudioFd >= 0 && mAudioIdx >= 0)
+	{
+		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+		ioctl(mAudioFd, AUDIO_STOP);
+		ioctl(mAudioFd, AUDIO_SELECT_SOURCE, AUDIO_SOURCE_DEMUX);
+		fcntl(mAudioFd, F_SETFL, mAudioFlags);
+	}
+	mVideoFd = mAudioFd = -1;
+}
+
+int64_t cDvbPlayer::pts90(const AVPacket *pkt, const AVStream *st) const
+{
+	int64_t ts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
+	if (ts == AV_NOPTS_VALUE)
+		return -1;
+	return (av_rescale_q(ts, st->time_base, AVRational{1, 90000}) - mStart90) & 0x1ffffffffLL;
+}
+
+bool cDvbPlayer::videoPes(AVPacket *pkt, std::vector<uint8_t> &pes)
+{
+	AVStream *st = mFmt->streams[mVideoIdx];
+	int64_t pts = pts90(pkt, st);
+	bool nal = mVideoType == STREAM_H264 || mVideoType == STREAM_H265;
+	if (!nal)
+	{
+		pesHeader(pes, pkt->size, PES_VIDEO, pts, false);
+		pes.insert(pes.end(), pkt->data, pkt->data + pkt->size);
+		return true;
+	}
+	bool hevc = mVideoType == STREAM_H265;
+	pesHeader(pes, -1, PES_VIDEO, pts, true);
+	/* the parameter sets once in front, should the stream bring none */
+	if (!mSpsSeen)
+		mSpsSeen = hasParameterSet(pkt->data, pkt->size, hevc);
+	AVCodecParameters *par = st->codecpar;
+	if (!mSpsSeen && par->extradata_size > 4 && par->extradata[0] == 0)
+		pes.insert(pes.end(), par->extradata, par->extradata + par->extradata_size);
+	if (hevc)
+		pes.push_back(0x00);
+	pes.insert(pes.end(), pkt->data, pkt->data + pkt->size);
+	return true;
+}
+
+bool cDvbPlayer::audioPes(AVPacket *pkt, std::vector<uint8_t> &pes)
+{
+	AVStream *st = mFmt->streams[mAudioIdx];
+	int64_t pts = pts90(pkt, st);
+	AVCodecParameters *par = st->codecpar;
+	bool adts = pkt->size > 1 && pkt->data[0] == 0xff && (pkt->data[1] & 0xf0) == 0xf0;
+	if (par->codec_id == AV_CODEC_ID_AAC && !adts)
+	{
+		/* raw AAC, as HLS in fragmented MP4 carries it: give it an ADTS header */
+		int len = pkt->size + 7;
+		int profile = par->profile >= 0 && par->profile < 4 ? par->profile : 1;
+		int rate = adtsRateIndex(par->sample_rate);
+		int ch = par->ch_layout.nb_channels;
+		pesHeader(pes, len, PES_AUDIO, pts, false);
+		pes.push_back(0xff);
+		pes.push_back(0xf1);
+		pes.push_back((profile << 6) | (rate << 2) | ((ch >> 2) & 1));
+		pes.push_back(((ch & 3) << 6) | (len >> 11));
+		pes.push_back((len >> 3) & 0xff);
+		pes.push_back(((len & 7) << 5) | 0x1f);
+		pes.push_back(0xfc);
+	}
+	else
+		pesHeader(pes, pkt->size, PES_AUDIO, pts, false);
+	pes.insert(pes.end(), pkt->data, pkt->data + pkt->size);
+	return true;
+}
+
+void cDvbPlayer::push(Queue &q, std::vector<uint8_t> &pes)
+{
+	std::unique_lock<std::mutex> lock(mQueueLock);
+	mQueueCond.wait(lock, [&] { return q.bytes < q.limit || mStop || mSeekReq; });
+	if (mStop || mSeekReq)
+		return;
+	q.bytes += pes.size();
+	q.pes.push_back(std::move(pes));
+	mQueueCond.notify_all();
+}
+
+void cDvbPlayer::writeLoop(int fd, Queue &q, unsigned &gen)
+{
+	std::unique_lock<std::mutex> lock(mQueueLock);
+	while (!mStop)
+	{
+		if (q.pes.empty())
+		{
+			gen = mGen;
+			mQueueCond.notify_all();
+			mQueueCond.wait(lock);
+			continue;
+		}
+		std::vector<uint8_t> pes = std::move(q.pes.front());
+		q.pes.pop_front();
+		q.bytes -= pes.size();
+		unsigned g = mGen;
+		mQueueCond.notify_all();
+		lock.unlock();
+
+		size_t off = 0;
+		while (off < pes.size() && !mStop && g == mGen)
+		{
+			ssize_t n = write(fd, pes.data() + off, pes.size() - off);
+			if (n > 0)
+				off += n;
+			else if (n < 0 && errno != EAGAIN && errno != EINTR)
+				break;
+			else
+				usleep(2000);
+		}
+
+		lock.lock();
+		gen = g;
+		mQueueCond.notify_all();
+	}
+}
+
+void cDvbPlayer::flush()
+{
+	{
+		std::lock_guard<std::mutex> lock(mQueueLock);
+		mGen++;
+		mVideoQ.pes.clear();
+		mVideoQ.bytes = 0;
+		mAudioQ.pes.clear();
+		mAudioQ.bytes = 0;
+		mQueueCond.notify_all();
+	}
+	/* a write the decoder holds back ends with its buffer cleared */
+	if (mVideoFd >= 0)
+		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
+	if (mAudioFd >= 0 && mAudioIdx >= 0)
+		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+	{
+		std::unique_lock<std::mutex> lock(mQueueLock);
+		mQueueCond.wait(lock, [&] { return mStop || (mVideoGen == mGen && (mAudioIdx < 0 || mAudioGen == mGen)); });
+	}
+	if (mVideoFd >= 0)
+		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
+	if (mAudioFd >= 0 && mAudioIdx >= 0)
+		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+}
+
+void cDvbPlayer::doSeek()
+{
+	int64_t target = mSeekTarget;
+	mSeekReq = false;
+	int64_t start = mFmt->start_time != AV_NOPTS_VALUE ? mFmt->start_time : 0;
+	int ret = av_seek_frame(mFmt, -1, start + target * 1000, AVSEEK_FLAG_BACKWARD);
+	hal_info("%s: to %lld ms%s\n", __func__, (long long)target, ret < 0 ? ", failed" : "");
+	if (ret < 0)
+		return;
+	flush();
+	mSpsSeen = false;
+	mDemuxDone = false;
+	mEof = false;
+}
+
+void cDvbPlayer::demuxLoop()
+{
+	AVPacket *pkt = av_packet_alloc();
+	bool waitKey = true;
+	uint64_t lastPts = 0;
+	int stillMs = 0;
+	while (!mStop)
+	{
+		if (mSeekReq)
+		{
+			doSeek();
+			waitKey = true;
+			continue;
+		}
+		if (mDemuxDone)
+		{
+			/* the end: when the queues are empty and the picture stands still */
+			usleep(100000);
+			bool empty;
+			{
+				std::lock_guard<std::mutex> lock(mQueueLock);
+				empty = mVideoQ.pes.empty() && mAudioQ.pes.empty();
+			}
+			uint64_t now = pts();
+			stillMs = (empty && now == lastPts && !mPaused) ? stillMs + 100 : 0;
+			lastPts = now;
+			if (stillMs >= 1000 && !mEof)
+			{
+				hal_info("%s: end of stream\n", __func__);
+				mEof = true;
+			}
+			continue;
+		}
+		int ret = av_read_frame(mFmt, pkt);
+		if (ret == AVERROR(EAGAIN))
+		{
+			usleep(10000);
+			continue;
+		}
+		if (ret < 0)
+		{
+			if (!mStop && !mSeekReq)
+			{
+				hal_info("%s: read ends (%d)\n", __func__, ret);
+				mDemuxDone = true;
+			}
+			continue;
+		}
+		mBytes += pkt->size;
+		std::vector<uint8_t> pes;
+		if (pkt->stream_index == mVideoIdx)
+		{
+			if (waitKey && !(pkt->flags & AV_PKT_FLAG_KEY))
+			{
+				av_packet_unref(pkt);
+				continue;
+			}
+			waitKey = false;
+			if (videoPes(pkt, pes))
+				push(mVideoQ, pes);
+		}
+		else if (pkt->stream_index == mAudioIdx && !waitKey && !mTrick)
+		{
+			if (audioPes(pkt, pes))
+				push(mAudioQ, pes);
+		}
+		av_packet_unref(pkt);
+	}
+	av_packet_free(&pkt);
+}
+
+uint64_t cDvbPlayer::pts()
+{
+	int64_t pts = 0;
+	if (mVideoFd >= 0 && ioctl(mVideoFd, VIDEO_GET_PTS, &pts) == 0 && pts > 0)
+		return pts;
+	if (mAudioFd >= 0 && mAudioIdx >= 0 && ioctl(mAudioFd, AUDIO_GET_PTS, &pts) == 0 && pts > 0)
+		return pts;
+	return 0;
+}
+
+bool cDvbPlayer::waitFirstPicture()
+{
+	for (int i = 0; i < 250 && !mStop && !mAbort; i++)
+	{
+		if (pts() > 0)
+			return true;
+		usleep(20000);
+	}
+	return false;
+}
+
+cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & /*audioUrl*/, const std::string &userAgent,
+				    const std::vector<std::string> &headerFields, int &error, int startMs, bool growing)
+{
+	stop();
+	mStop = false;
+	mEof = false;
+	mPaused = false;
+	mTrick = false;
+	mSeekReq = false;
+	mDemuxDone = false;
+	mSpsSeen = false;
+	mBytes = 0;
+	mGrowing = growing;
+	error = 0;
+
+	int ret = openInput(url, userAgent, headerFields);
+	if (mAbort)
+	{
+		stop();
+		return ABORTED;
+	}
+	if (ret < 0)
+	{
+		error = ret;
+		hal_info("%s: cannot open %s (%d)\n", __func__, url.c_str(), ret);
+		stop();
+		return FAILED;
+	}
+	if (!pickStreams())
+	{
+		stop();
+		return UNSUPPORTED;
+	}
+	if (startMs > 0)
+	{
+		int64_t start = mFmt->start_time != AV_NOPTS_VALUE ? mFmt->start_time : 0;
+		av_seek_frame(mFmt, -1, start + (int64_t)startMs * 1000, AVSEEK_FLAG_BACKWARD);
+	}
+
+	setupDecoders();
+	mVideoGen = mAudioGen = mGen;
+	mDemuxThread = std::thread(&cDvbPlayer::demuxLoop, this);
+	mVideoThread = std::thread(&cDvbPlayer::writeLoop, this, mVideoFd, std::ref(mVideoQ), std::ref(mVideoGen));
+	if (mAudioIdx >= 0)
+		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, mAudioFd, std::ref(mAudioQ), std::ref(mAudioGen));
+	mPlaying = true;
+
+	if (!waitFirstPicture())
+		hal_info("%s: no picture yet\n", __func__);
+	if (mAbort)
+	{
+		stop();
+		return ABORTED;
+	}
+	return OK;
+}
+
+void cDvbPlayer::stop()
+{
+	mStop = true;
+	mQueueCond.notify_all();
+	if (mVideoFd >= 0)
+		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
+	if (mAudioFd >= 0 && mAudioIdx >= 0)
+		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+	if (mDemuxThread.joinable())
+		mDemuxThread.join();
+	if (mVideoThread.joinable())
+		mVideoThread.join();
+	if (mAudioThread.joinable())
+		mAudioThread.join();
+	if (mPlaying)
+		releaseDecoders();
+	mPlaying = false;
+
+	mVideoQ.pes.clear();
+	mVideoQ.bytes = 0;
+	mAudioQ.pes.clear();
+	mAudioQ.bytes = 0;
+	if (mFmt)
+		avformat_close_input(&mFmt);
+	if (mIo)
+	{
+		av_freep(&mIo->buffer);
+		avio_context_free(&mIo);
+	}
+	if (mFd >= 0)
+	{
+		close(mFd);
+		mFd = -1;
+	}
+	mVideoIdx = mAudioIdx = -1;
+}
+
+bool cDvbPlayer::setPaused(bool paused)
+{
+	if (!mPlaying)
+		return false;
+	if (paused)
+	{
+		ioctl(mVideoFd, VIDEO_FREEZE);
+		if (mAudioIdx >= 0)
+			ioctl(mAudioFd, AUDIO_PAUSE);
+	}
+	else
+	{
+		ioctl(mVideoFd, VIDEO_FAST_FORWARD, 0);
+		ioctl(mVideoFd, VIDEO_CONTINUE);
+		if (mAudioIdx >= 0)
+			ioctl(mAudioFd, AUDIO_CONTINUE);
+	}
+	mPaused = paused;
+	return true;
+}
+
+bool cDvbPlayer::seek(int64_t ms, bool absolute)
+{
+	if (!mPlaying)
+		return false;
+	if (!absolute)
+	{
+		int64_t pos = 0, dur = 0;
+		position(pos, dur);
+		ms += pos;
+	}
+	if (ms < 0)
+		ms = 0;
+	mSeekTarget = ms;
+	mSeekReq = true;
+	mQueueCond.notify_all();
+	return true;
+}
+
+void cDvbPlayer::setTrick(bool on)
+{
+	if (mTrick == on || !mPlaying)
+		return;
+	mTrick = on;
+	if (mAudioIdx >= 0)
+		ioctl(mAudioFd, AUDIO_SET_AV_SYNC, on ? 0 : 1);
+}
+
+bool cDvbPlayer::position(int64_t &posMs, int64_t &durMs)
+{
+	if (!mPlaying)
+		return false;
+	posMs = pts() / 90;
+	durMs = mFmt && mFmt->duration != AV_NOPTS_VALUE ? mFmt->duration / 1000 : 0;
+	return true;
+}
+
+void cDvbPlayer::audioTracks(std::vector<Track> &tracks)
+{
+	tracks.clear();
+	if (!mFmt)
+		return;
+	for (unsigned i = 0; i < mFmt->nb_streams; i++)
+	{
+		AVStream *st = mFmt->streams[i];
+		if (st->codecpar->codec_type != AVMEDIA_TYPE_AUDIO || bypassFor(st->codecpar->codec_id) < 0)
+			continue;
+		Track t;
+		t.id = trackId(st);
+		t.ac3flag = ac3flag(st->codecpar->codec_id);
+		AVDictionaryEntry *lang = av_dict_get(st->metadata, "language", NULL, 0);
+		t.language = lang ? lang->value : "Stream " + std::to_string(t.id);
+		tracks.push_back(t);
+	}
+}
+
+void cDvbPlayer::metadata(std::vector<std::string> &keys, std::vector<std::string> &values)
+{
+	keys.clear();
+	values.clear();
+	if (!mFmt)
+		return;
+	AVDictionaryEntry *e = NULL;
+	while ((e = av_dict_get(mFmt->metadata, "", e, AV_DICT_IGNORE_SUFFIX)))
+	{
+		keys.push_back(e->key);
+		values.push_back(e->value);
+	}
+}

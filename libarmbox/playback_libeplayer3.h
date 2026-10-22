@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <OpenThreads/Mutex>
+#include <pthread.h>
 
 typedef enum
 {
@@ -12,6 +13,7 @@ typedef enum
 } playmode_t;
 
 struct AVFormatContext;
+class cDvbPlayer;
 
 class cPlayback
 {
@@ -35,6 +37,17 @@ class cPlayback
 		off64_t last_size;
 		int init_jump;
 		AVFormatContext *avft;
+		/* the box's decoders through ffmpeg first, libeplayer3 for what they cannot take */
+		cDvbPlayer *hw;
+		bool hwActive;
+		pthread_t trick_thread;
+		pthread_mutex_t trick_lock;
+		pthread_cond_t trick_cond;
+		bool trick_active;
+		int trick_speed;
+		static void *trickLoop(void *arg);
+		void trickStart(int speed);
+		void trickStop(void);
 		std::string extractParam(const std::string &hdrs, const std::string &paramName);
 	public:
 		cPlayback(int num = 0);
