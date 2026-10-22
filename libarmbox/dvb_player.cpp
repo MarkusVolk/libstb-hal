@@ -263,8 +263,8 @@ int cDvbPlayer::openInput(const std::string &url, const std::string &userAgent, 
 			return AVERROR(ENOMEM);
 		mFmt->pb = mIo;
 		/* a recording just begun is short, do not wait for more to analyse */
-		mFmt->probesize = 1 << 20;
-		mFmt->max_analyze_duration = AV_TIME_BASE;
+		mFmt->probesize = 512 * 1024;
+		mFmt->max_analyze_duration = AV_TIME_BASE / 2;
 	}
 	else
 	{
@@ -665,7 +665,20 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 		stop();
 		return UNSUPPORTED;
 	}
-	if (startMs > 0)
+	/* a timeshift of held live TV goes on from the picture held, which the
+	 * recording carries with the same time */
+	int64_t held = growing ? videoDecoder->HeldPts() : -1;
+	AVStream *vst = mFmt->streams[mVideoIdx];
+	if (held > 0)
+	{
+		int64_t ts = av_rescale_q(held, AVRational{1, 90000}, vst->time_base);
+		int64_t wrap = av_rescale_q(1LL << 33, AVRational{1, 90000}, vst->time_base);
+		if (vst->start_time != AV_NOPTS_VALUE && ts < vst->start_time)
+			ts += wrap;
+		hal_info("%s: from the held picture at %lld\n", __func__, (long long)held);
+		av_seek_frame(mFmt, mVideoIdx, ts, AVSEEK_FLAG_BACKWARD);
+	}
+	else if (startMs > 0)
 	{
 		int64_t start = mFmt->start_time != AV_NOPTS_VALUE ? mFmt->start_time : 0;
 		av_seek_frame(mFmt, -1, start + (int64_t)startMs * 1000, AVSEEK_FLAG_BACKWARD);

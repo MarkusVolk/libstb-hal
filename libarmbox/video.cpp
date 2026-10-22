@@ -569,6 +569,7 @@ cVideo::cVideo(int, void *, void *, unsigned int unit)
 	video_standby = 0;
 	blank_mode = 0;
 	live_paused = false;
+	held_pts = -1;
 	hw_caps_t *hwcaps = get_hwcaps();
 	if (unit > (unsigned int) hwcaps->pip_devs)
 	{
@@ -730,6 +731,8 @@ bool cVideo::LivePause(bool on)
 	if (on)
 	{
 		HoldPicture(true);
+		int64_t pts = GetPTS();
+		held_pts = pts > 0 ? pts : -1;
 		if (fop(ioctl, VIDEO_STOP, 0) < 0)
 		{
 			HoldPicture(false);
@@ -751,6 +754,7 @@ int cVideo::Start(void * /*PcrChannel*/, unsigned short /*PcrPid*/, unsigned sho
 {
 	hal_debug("#%d: %s playstate=%d\n", devnum, __func__, playstate);
 	live_paused = false;
+	held_pts = -1;
 	HoldPicture(false);
 #if 0
 	if (playstate == VIDEO_PLAYING)

@@ -193,6 +193,7 @@ class cVideo
 		int blank_mode;
 		bool live_paused;
 		std::string held_zapmode;
+		int64_t held_pts;
 
 		/* used internally by dmx */
 		int64_t GetPTS(void);
@@ -272,6 +273,8 @@ class cVideo
 		/* keep the picture shown over a change of the decoder's source,
 		 * whatever zap mode is set; off: the zap mode set again */
 		void HoldPicture(bool on);
+		/* 90 kHz, of the live picture held by LivePause(), -1 when none */
+		int64_t HeldPts(void) { return held_pts; }
 		bool GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get_video = true, bool get_osd = false, bool scale_to_video = false);
 };
 
