@@ -135,7 +135,6 @@ bool cPlayback::Start(char *filename, int vpid, int vtype, int apid, int ac3, in
 
 	hal_info("%s - filename=%s vpid=%u vtype=%d apid=%u ac3=%d\n", __func__, filename, vpid, vtype, apid, ac3);
 
-	init_jump = -1;
 	//create playback path
 	mAudioStream = 0;
 	mSubtitleStream = -1;
@@ -291,7 +290,7 @@ bool cPlayback::Start(char *filename, int vpid, int vtype, int apid, int ac3, in
 			}
 
 			playing = true;
-			first = true;
+			first = init_jump < 0;
 			player->output->Command(player, OUTPUT_OPEN, NULL);
 			ret = (player->playback->Command(player, PLAYBACK_PLAY, NULL) == 0);
 
@@ -567,6 +566,13 @@ bool cPlayback::GetPosition(int &position, int &duration, bool isWebChannel)
 bool cPlayback::SetPosition(int position, bool absolute)
 {
 	hal_info("%s %d\n", __func__, position);
+
+	if (!playing)
+	{
+		/* before Start(): the position to open at, taken by the first SetSpeed() */
+		init_jump = absolute ? position : -1;
+		return false;
+	}
 
 	if (playing && first)
 	{
