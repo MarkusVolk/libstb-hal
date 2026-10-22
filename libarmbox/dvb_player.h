@@ -60,6 +60,7 @@ class cDvbPlayer : public cHwPlayer
 			size_t limit = 0;
 		};
 
+		void setAndWake(std::atomic<bool> &flag);
 		static int interruptCb(void *opaque);
 		static int ioRead(void *opaque, uint8_t *buf, int size);
 		static int64_t ioSeek(void *opaque, int64_t offset, int whence);

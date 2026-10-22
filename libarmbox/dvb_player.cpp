@@ -194,10 +194,20 @@ void cDvbPlayer::reset()
 	mAbort = false;
 }
 
+/* set under the queue lock: a thread that found it unset and is about
+ * to wait would else miss the wake-up and wait for ever */
+void cDvbPlayer::setAndWake(std::atomic<bool> &flag)
+{
+	{
+		std::lock_guard<std::mutex> lock(mQueueLock);
+		flag = true;
+	}
+	mQueueCond.notify_all();
+}
+
 void cDvbPlayer::abort()
 {
-	mAbort = true;
-	mQueueCond.notify_all();
+	setAndWake(mAbort);
 }
 
 int cDvbPlayer::interruptCb(void *opaque)
@@ -732,8 +742,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string & 
 
 void cDvbPlayer::stop()
 {
-	mStop = true;
-	mQueueCond.notify_all();
+	setAndWake(mStop);
 	if (mVideoFd >= 0)
 		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
 	if (mAudioFd >= 0 && mAudioIdx >= 0)
@@ -801,8 +810,7 @@ bool cDvbPlayer::seek(int64_t ms, bool absolute)
 	if (ms < 0)
 		ms = 0;
 	mSeekTarget = ms;
-	mSeekReq = true;
-	mQueueCond.notify_all();
+	setAndWake(mSeekReq);
 	return true;
 }
 
