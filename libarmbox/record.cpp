@@ -15,6 +15,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <time.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <malloc.h>
@@ -241,6 +242,13 @@ void cRecord::WriterThread()
 	}
 }
 
+static int64_t monotonic_ms()
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
 void cRecord::RecordThread()
 {
 	hal_info("%s: begin\n", __func__);
@@ -279,6 +287,7 @@ void cRecord::RecordThread()
 	dmx->Start();
 	int overflow_count = 0;
 	bool overflow = false;
+	int64_t full_since = 0;
 	int r = 0;
 	while (exit_flag == RECORD_RUNNING)
 	{
@@ -286,7 +295,8 @@ void cRecord::RecordThread()
 		{
 			if (overflow_count)
 			{
-				hal_info("%s: Overflow cleared after %d iterations\n", __func__, overflow_count);
+				hal_info("%s: Overflow cleared after %d iterations, %d ms\n", __func__, overflow_count,
+					 (int)(monotonic_ms() - full_since));
 				overflow_count = 0;
 			}
 			int toread = bufsize - buf_pos;
@@ -302,6 +312,13 @@ void cRecord::RecordThread()
 					exit_flag = RECORD_FAILED_READ;
 					state = REC_STATUS_OVERFLOW;
 					break;
+				}
+				/* the demux could not bridge the full buffer: data is lost,
+				 * the medium was too slow, not just a short stall */
+				if (errno == EOVERFLOW)
+				{
+					hal_info("%s: demux overflow after a full buffer, data lost\n", __func__);
+					state = REC_STATUS_SLOW;
 				}
 			}
 			else
@@ -322,11 +339,13 @@ void cRecord::RecordThread()
 		else
 		{
 			if (!overflow)
+			{
 				overflow_count = 0;
+				full_since = monotonic_ms();
+			}
 			overflow = true;
 			if (!(overflow_count % 10))
 				hal_info("%s: buffer full! Overflow? (%d)\n", __func__, ++overflow_count);
-			state = REC_STATUS_SLOW;
 		}
 		r = aio_submitted ? aio_error(&a) : 0;
 		if (r == EINPROGRESS)
