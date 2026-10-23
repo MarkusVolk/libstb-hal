@@ -334,13 +334,14 @@ void cRecord::RecordThread()
 			hal_debug("%s: aio in progress, free: %d\n", __func__, bufsize - buf_pos);
 			continue;
 		}
+		int aio_err = r; /* the errno of the finished write */
 		// not calling aio_return causes a memory leak --martii
 		r = aio_submitted ? aio_return(&a) : 0;
 		aio_submitted = false;
 		if (r < 0)
 		{
 			exit_flag = RECORD_FAILED_FILE;
-			hal_debug("%s: aio_return = %d (%m)\n", __func__, r);
+			hal_info("%s: aio_return = %d (%s)\n", __func__, r, strerror(aio_err));
 			break;
 		}
 		else
@@ -365,7 +366,7 @@ void cRecord::RecordThread()
 		aio_submitted = true;
 	}
 	dmx->Stop();
-	while (true) /* write out the unwritten buffer content */
+	while (exit_flag != RECORD_FAILED_FILE) /* write out the unwritten buffer content */
 	{
 		hal_debug("%s: run-out write, buf_pos %d\n", __func__, buf_pos);
 		r = aio_submitted ? aio_error(&a) : 0;
@@ -374,12 +375,13 @@ void cRecord::RecordThread()
 			usleep(50000);
 			continue;
 		}
+		int aio_err = r;
 		r = aio_submitted ? aio_return(&a) : 0;
 		aio_submitted = false;
 		if (r < 0)
 		{
 			exit_flag = RECORD_FAILED_FILE;
-			hal_info("%s: aio_result: %d (%m)\n", __func__, r);
+			hal_info("%s: aio_result: %d (%s)\n", __func__, r, strerror(aio_err));
 			break;
 		}
 		if (!queued)
