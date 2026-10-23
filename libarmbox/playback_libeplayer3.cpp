@@ -551,6 +551,8 @@ bool cPlayback::SetSpeed(int speed)
 void *cPlayback::trickLoop(void *arg)
 {
 	cPlayback *p = (cPlayback *)arg;
+	int64_t target = -1;
+	int last = 0;
 	pthread_mutex_lock(&p->trick_lock);
 	while (p->trick_active)
 	{
@@ -566,18 +568,39 @@ void *cPlayback::trickLoop(void *arg)
 		pthread_mutex_unlock(&p->trick_lock);
 
 		int position = 0, duration = 0;
-		if (p->hwActive && p->GetPosition(position, duration))
+		bool ended = false;
+		if (speed && p->hwActive && p->GetPosition(position, duration))
 		{
-			int64_t target = position + speed * TRICK_INTERVAL_MS;
-			/* stop short of the end of a growing recording, and at its start */
+			/* the next place follows from the last one, not from the picture
+			 * shown: the decoder plays on from the keyframe before it, and with
+			 * keyframes further apart than a step it came back to the same one */
+			if (target < 0 || speed != last)
+				target = position;
+			last = speed;
+			target += speed * TRICK_INTERVAL_MS;
+			/* at the start, and short of the end of a growing recording, it
+			 * plays on at normal speed */
 			if (duration > 0 && target > duration - 1000)
+			{
 				target = duration - 1000;
+				ended = true;
+			}
 			if (target < 0)
+			{
 				target = 0;
-			if (target != position)
-				p->hw->seek(target, true);
+				ended = true;
+			}
+			p->hw->seek(target, true);
+			if (ended)
+			{
+				p->hw->setTrick(false);
+				p->nPlaybackSpeed = 1;
+				target = -1;
+			}
 		}
 		pthread_mutex_lock(&p->trick_lock);
+		if (ended && p->trick_speed == speed)
+			p->trick_speed = 0;
 	}
 	pthread_mutex_unlock(&p->trick_lock);
 	return NULL;
