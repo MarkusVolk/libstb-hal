@@ -1433,10 +1433,19 @@ static bool swscale(unsigned char *src, unsigned char *dst, int sw, int sh, int 
 	return ret;
 }
 
+/* udev names the framebuffer /dev/fb0, mdev images /dev/fb/0 */
+static int open_fb(int flags)
+{
+	int fb = open("/dev/fb0", flags);
+	if (fb == -1)
+		fb = open("/dev/fb/0", flags);
+	return fb;
+}
+
 // grabing the osd picture
 void get_osd_size(int &xres, int &yres, int &bits_per_pixel)
 {
-	int fb = open("/dev/fb/0", O_RDWR);
+	int fb = open_fb(O_RDWR);
 	if (fb == -1)
 	{
 		fprintf(stderr, "Framebuffer failed\n");
@@ -1463,7 +1472,7 @@ void get_osd_buf(unsigned char *osd_data)
 	struct fb_fix_screeninfo fix_screeninfo;
 	struct fb_var_screeninfo var_screeninfo;
 
-	int fb = open("/dev/fb/0", O_RDONLY);
+	int fb = open_fb(O_RDONLY);
 	if (fb == -1)
 	{
 		fprintf(stderr, "Framebuffer failed\n");
