@@ -193,6 +193,10 @@ bool cRecord::AddPid(unsigned short pid)
 	return dmx->addPid(pid);
 }
 
+/* a timeshift plays from just behind the end of the file, which must not
+ * grow in steps longer than the decoder can bridge */
+static const int WRITE_INTERVAL_MS = 250;
+
 static int64_t monotonic_ms()
 {
 	struct timespec t;
@@ -239,6 +243,7 @@ void cRecord::RecordThread()
 	int overflow_count = 0;
 	bool overflow = false;
 	int64_t full_since = 0;
+	int64_t written_at = 0;
 	int r = 0;
 	while (exit_flag == RECORD_RUNNING)
 	{
@@ -278,7 +283,7 @@ void cRecord::RecordThread()
 				buf_pos += s;
 				if (count > 100)
 				{
-					if (buf_pos < bufsize / 2)
+					if (buf_pos < bufsize / 2 && monotonic_ms() - written_at < WRITE_INTERVAL_MS)
 						continue;
 				}
 				else
@@ -339,6 +344,7 @@ void cRecord::RecordThread()
 			break;
 		}
 		queued_aio = true;
+		written_at = monotonic_ms();
 	}
 	dmx->Stop();
 	while (exit_flag != RECORD_FAILED_FILE) /* write out the unwritten buffer content */
