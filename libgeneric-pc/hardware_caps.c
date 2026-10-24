@@ -49,6 +49,7 @@ hw_caps_t *get_hwcaps(void)
 	caps.can_ar_16_10 = 1;
 	caps.can_select_audio_output = 1;
 	caps.can_live_pause = 1;
+	caps.media_in_home = 1;
 	strcpy(caps.rc_device, "/tmp/neutrino.input");
 	strcpy(caps.rc_device_fallback, "/tmp/neutrino.input");
 	strcpy(caps.display_dev, "/dev/null");

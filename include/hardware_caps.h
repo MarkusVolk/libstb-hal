@@ -100,6 +100,7 @@ typedef struct hw_caps
 	int multiboot_first_partition; /* mmcblk0p<n> is the first image slot, 0: no such layout */
 	int multiboot_devicetree; /* the slot is read from the device tree */
 	int can_ar_16_10; /* appended last: keeps the layout of older headers */
+	int media_in_home; /* music, videos and pictures default to the user's home */
 } hw_caps_t;
 
 hw_caps_t *get_hwcaps(void);

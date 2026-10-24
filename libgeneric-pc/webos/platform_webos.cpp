@@ -21,6 +21,8 @@ void platform_caps(hw_caps_t *caps)
 	/* the TV is switched off by whoever started neutrino, after it ends
 	 * with the poweroff action */
 	caps->can_shutdown = 1;
+	/* recordings go to the USB drive the TV mounts, not into the app home */
+	caps->media_in_home = 0;
 	strcpy(caps->boxmodel, "webos");
 	strcpy(caps->boxvendor, "LG");
 	strcpy(caps->boxname, "webOS TV");
