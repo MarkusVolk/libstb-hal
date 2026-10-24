@@ -65,6 +65,7 @@ const size_t VIDEO_QUEUE_BYTES = 4 << 20;
 const size_t AUDIO_QUEUE_BYTES = 1 << 20;
 /* how long the end of a recording that is still written waits for more */
 const int GROW_WAIT_MS = 3000;
+const int HELD_LEAD_MS = 2000;
 
 void pesHeader(std::vector<uint8_t> &out, int size, uint8_t streamId, int64_t pts, bool fakeStart)
 {
@@ -816,7 +817,10 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 		if (vst->start_time != AV_NOPTS_VALUE && ts < vst->start_time)
 			ts += wrap;
 		hal_info("%s: from the held picture at %lld\n", __func__, (long long)held);
-		av_seek_frame(mFmt, mVideoIdx, ts, AVSEEK_FLAG_BACKWARD);
+		/* a stream that refreshes its picture over a while, without real
+		 * I-frames, is complete only some time after its key frame */
+		int64_t lead = av_rescale_q(HELD_LEAD_MS * 90LL, AVRational{1, 90000}, vst->time_base);
+		av_seek_frame(mFmt, mVideoIdx, ts - lead, AVSEEK_FLAG_BACKWARD);
 		mAudioFrom = held;
 	}
 	else if (startMs > 0)
