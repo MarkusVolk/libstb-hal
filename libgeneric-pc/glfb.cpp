@@ -340,8 +340,23 @@ void GLFbPC::initKeys()
 	mKeyMap[SDLK_MEDIA_RECORD]         = KEY_RECORD;
 	mKeyMap[SDLK_MEDIA_FAST_FORWARD]   = KEY_FORWARD;
 	mKeyMap[SDLK_MEDIA_REWIND]         = KEY_REWIND;
-	mKeyMap[SDLK_MEDIA_NEXT_TRACK]     = KEY_NEXT;
-	mKeyMap[SDLK_MEDIA_PREVIOUS_TRACK] = KEY_PREVIOUS;
+	mKeyMap[SDLK_MEDIA_NEXT_TRACK]     = KEY_NEXTSONG;
+	mKeyMap[SDLK_MEDIA_PREVIOUS_TRACK] = KEY_PREVIOUSSONG;
+
+	/* keys of PC remote controls, by their evdev code */
+	mRawKeyMap[KEY_COMPOSE]  = KEY_MENU;
+	mRawKeyMap[KEY_CONFIG]   = KEY_MENU;
+	mRawKeyMap[KEY_HOMEPAGE] = KEY_HOME;
+	mRawKeyMap[KEY_SEARCH]   = KEY_EPG;
+	mRawKeyMap[KEY_MAIL]     = KEY_INFO;
+	mRawKeyMap[KEY_WWW]      = KEY_WWW;
+	mRawKeyMap[KEY_ZOOMIN]   = KEY_ZOOMIN;
+	mRawKeyMap[KEY_ZOOMOUT]  = KEY_ZOOMOUT;
+	mRawKeyMap[KEY_MENU]     = KEY_MENU;
+	mRawKeyMap[KEY_RED]      = KEY_RED;
+	mRawKeyMap[KEY_GREEN]    = KEY_GREEN;
+	mRawKeyMap[KEY_YELLOW]   = KEY_YELLOW;
+	mRawKeyMap[KEY_BLUE]     = KEY_BLUE;
 	mKeyMap[SDLK_A] = KEY_AUDIO;
 	mKeyMap[SDLK_E] = KEY_EPG;
 	//     [SDLK_F]  is reserved to toggle fullscreen;
@@ -791,7 +806,7 @@ void GLFbPC::pollEvents()
 				if (mTermFd >= 0)
 					termKey(ev.key);
 				else if (!producesText(ev.key.key))
-					handleKey(ev.key.key, ev.key.scancode, ev.key.repeat);
+					handleKey(ev.key.key, ev.key.scancode, ev.key.repeat, ev.key.raw);
 				else
 				{
 					mTextScan = ev.key.scancode;
@@ -967,9 +982,9 @@ bool GLFbPC::producesText(SDL_Keycode key)
 	}
 }
 
-void GLFbPC::handleKey(SDL_Keycode key, SDL_Scancode scan, bool repeat)
+void GLFbPC::handleKey(SDL_Keycode key, SDL_Scancode scan, bool repeat, Uint16 raw)
 {
-	hal_debug("GLFB::%s: 0x%x\n", __func__, (unsigned int)key);
+	hal_debug("GLFB::%s: 0x%x raw %u\n", __func__, (unsigned int)key, raw);
 	/* on KMS there is no desktop to leave the fullscreen window for */
 	const char *driver = SDL_GetCurrentVideoDriver();
 	if (key == SDLK_F && !(driver && !strcmp(driver, "kmsdrm")))
@@ -979,19 +994,27 @@ void GLFbPC::handleKey(SDL_Keycode key, SDL_Scancode scan, bool repeat)
 		SDL_SetWindowFullscreen(mWindow, !mFullscreen);
 		return;
 	}
+	int code;
 	std::map<SDL_Keycode, int>::const_iterator i = mKeyMap.find(key);
-	if (i == mKeyMap.end())
-		return;
+	if (i != mKeyMap.end())
+		code = i->second;
+	else
+	{
+		std::map<Uint16, int>::const_iterator r = mRawKeyMap.find(raw);
+		if (r == mRawKeyMap.end())
+			return;
+		code = r->second;
+	}
 	if (scan == SDL_SCANCODE_UNKNOWN)
 	{
-		pushKey(i->second);
+		pushKey(code);
 		return;
 	}
 	/* Down, held and up as the keyboard has them: neutrino then repeats
 	 * only the keys it repeats on a remote control. Pressing and releasing
 	 * at once made every repeat of a held key a press of its own. */
-	sendKey(i->second, repeat ? 2 : 1);
-	mHeld[scan] = i->second;
+	sendKey(code, repeat ? 2 : 1);
+	mHeld[scan] = code;
 }
 
 void GLFbPC::sendKey(int code, int value)

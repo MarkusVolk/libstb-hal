@@ -123,6 +123,7 @@ class GLFbPC
 		std::vector<unsigned char> *osd_buf; /* silly bounce buffer */
 
 		std::map<SDL_Keycode, int> mKeyMap;
+		std::map<Uint16, int> mRawKeyMap; /* evdev codes of keys SDL has no keycode for */
 		SDL_Window *mWindow;
 		SDL_GLContext mContext;
 		uint32_t mUserEvent; /* wakes the GL thread: blit() and mpv frames */
@@ -144,7 +145,7 @@ class GLFbPC
 		void render(); /* actual render function */
 		void pollEvents(); /* waits for SDL window, keyboard and wakeup events */
 		void checkConnectors(); /* on KMS: reads the EDID again where it is missing */
-		void handleKey(SDL_Keycode key, SDL_Scancode scan = SDL_SCANCODE_UNKNOWN, bool repeat = false);
+		void handleKey(SDL_Keycode key, SDL_Scancode scan = SDL_SCANCODE_UNKNOWN, bool repeat = false, Uint16 raw = 0);
 		void pushKey(int code);
 		void sendKey(int code, int value);
 		/* keys of the keyboard that neutrino was told are down, released
