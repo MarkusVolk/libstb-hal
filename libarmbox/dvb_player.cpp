@@ -8,8 +8,12 @@
  */
 #include <config.h>
 
+#include <algorithm>
+
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -31,6 +35,7 @@ extern "C" {
 #include "audio_lib.h"
 #include "video_lib.h"
 #include "hal_debug.h"
+#include "proc_tools.h"
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
 #define hal_info(args...)  _hal_info(HAL_DEBUG_PLAYBACK, this, args)
@@ -50,7 +55,8 @@ enum
 	STREAM_H265 = 7,
 	STREAM_H265_ALT = 22,
 	BYPASS_AC3 = 0,
-	BYPASS_MPEG = 0xa,
+	BYPASS_MPEG = 1,
+	BYPASS_MP3 = 0xa,
 	BYPASS_AAC_ADTS = 0xb,
 	BYPASS_EAC3 = 0x22,
 	BYPASS_EAC3_ALT = 7
@@ -66,6 +72,15 @@ const size_t AUDIO_QUEUE_BYTES = 1 << 20;
 /* how long the end of a recording that is still written waits for more */
 const int GROW_WAIT_MS = 3000;
 const int HELD_LEAD_MS = 2000;
+const char *FALLBACK_RATE = "/proc/stb/vmpeg/0/fallback_framerate";
+#if BOXMODEL_HD51 || BOXMODEL_BRE2ZE4K || BOXMODEL_H7
+/* the BCM7251S decodes H.264 only up to HD; beyond, picture and clock stand still */
+const int H264_MAX_WIDTH = 1920;
+const int H264_MAX_HEIGHT = 1088;
+#else
+const int H264_MAX_WIDTH = 0;
+const int H264_MAX_HEIGHT = 0;
+#endif
 
 void pesHeader(std::vector<uint8_t> &out, int size, uint8_t streamId, int64_t pts, bool fakeStart)
 {
@@ -151,8 +166,8 @@ int bypassFor(enum AVCodecID id)
 	{
 		case AV_CODEC_ID_AC3: return BYPASS_AC3;
 		case AV_CODEC_ID_EAC3: return BYPASS_EAC3;
-		case AV_CODEC_ID_MP2:
-		case AV_CODEC_ID_MP3: return BYPASS_MPEG;
+		case AV_CODEC_ID_MP2: return BYPASS_MPEG;
+		case AV_CODEC_ID_MP3: return BYPASS_MP3;
 		case AV_CODEC_ID_AAC: return BYPASS_AAC_ADTS;
 		default: return -1;
 	}
@@ -168,6 +183,20 @@ int streamTypeFor(enum AVCodecID id)
 		case AV_CODEC_ID_MPEG1VIDEO: return STREAM_MPEG1;
 		default: return -1;
 	}
+}
+
+/* the rate the decoder takes for a stream that does not tell its own */
+int fallbackRate(AVRational r)
+{
+	static const int rates[] = { 23976, 24000, 25000, 29970, 30000, 50000, 59940, 60000 };
+	if (r.num <= 0 || r.den <= 0)
+		return 0;
+	int64_t want = av_rescale(r.num, 1000, r.den);
+	int best = rates[0];
+	for (unsigned i = 1; i < sizeof(rates) / sizeof(rates[0]); i++)
+		if (llabs(want - rates[i]) < llabs(want - best))
+			best = rates[i];
+	return best;
 }
 
 } /* namespace */
@@ -358,6 +387,12 @@ bool cDvbPlayer::pickStreams()
 		hal_info("%s: video %s goes on to the fallback\n", __func__, avcodec_get_name(vcodec));
 		return false;
 	}
+	AVCodecParameters *vpar = mFmt->streams[mVideoIdx]->codecpar;
+	if (vcodec == AV_CODEC_ID_H264 && H264_MAX_WIDTH && (vpar->width > H264_MAX_WIDTH || vpar->height > H264_MAX_HEIGHT))
+	{
+		hal_info("%s: h264 %dx%d goes on to the fallback\n", __func__, vpar->width, vpar->height);
+		return false;
+	}
 
 	mAudioIdx = -1;
 	if (mAudioFmt)
@@ -406,6 +441,16 @@ void cDvbPlayer::setupDecoders()
 	mVideoFd = videoDecoder->fd;
 	mAudioFd = audioDecoder->fd;
 
+	AVStream *vst = mFmt->streams[mVideoIdx];
+	int rate = fallbackRate(vst->avg_frame_rate.num > 0 ? vst->avg_frame_rate : vst->r_frame_rate);
+	char old[16];
+	mFallbackRate.clear();
+	if (rate && proc_get(FALLBACK_RATE, old, sizeof(old)) > 0)
+	{
+		mFallbackRate = old;
+		std::string val = std::to_string(rate);
+		proc_put(FALLBACK_RATE, val.c_str(), val.size());
+	}
 	if (mVideoFd >= 0)
 	{
 		mVideoFlags = fcntl(mVideoFd, F_GETFL);
@@ -434,6 +479,9 @@ void cDvbPlayer::setupDecoders()
 void cDvbPlayer::releaseDecoders()
 {
 	videoDecoder->HoldPicture(false);
+	if (!mFallbackRate.empty())
+		proc_put(FALLBACK_RATE, mFallbackRate.c_str(), mFallbackRate.size());
+	mFallbackRate.clear();
 	if (mVideoFd >= 0)
 	{
 		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
@@ -552,8 +600,12 @@ void cDvbPlayer::writeLoop(int fd, Queue &q, unsigned &gen)
 				off += n;
 			else if (n < 0 && errno != EAGAIN && errno != EINTR)
 				break;
-			else
-				usleep(2000);
+			else if (n == 0 || errno == EAGAIN)
+			{
+				/* a short wait, so that a stop or flush is seen */
+				struct pollfd pfd = { fd, POLLOUT, 0 };
+				poll(&pfd, 1, 20);
+			}
 		}
 
 		lock.lock();
@@ -826,12 +878,17 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 	else if (startMs > 0)
 	{
 		int64_t start = mFmt->start_time != AV_NOPTS_VALUE ? mFmt->start_time : 0;
-		av_seek_frame(mFmt, -1, start + (int64_t)startMs * 1000, AVSEEK_FLAG_BACKWARD);
+		bool exact = !mAudioFmt && mAudioIdx >= 0;
+		int64_t from = exact ? std::max<int64_t>(startMs - HELD_LEAD_MS, 0) : startMs;
+		av_seek_frame(mFmt, -1, start + from * 1000, AVSEEK_FLAG_BACKWARD);
 		if (mAudioFmt)
 			av_seek_frame(mAudioFmt, -1, start + (int64_t)startMs * 1000, AVSEEK_FLAG_BACKWARD);
+		else if (exact)
+			mAudioFrom = (mStart90 + (int64_t)startMs * 90) & 0x1ffffffffLL;
 	}
 
 	uint64_t livePts = videoDecoder->GetPTS();
+	int64_t from = mAudioFrom;
 	setupDecoders();
 	mVideoGen = mAudioGen = mGen;
 	mFollow = true;
@@ -843,7 +900,7 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, mAudioFd, std::ref(mAudioQ), std::ref(mAudioGen));
 	mPlaying = true;
 
-	if (!waitFirstPicture(livePts, held))
+	if (!waitFirstPicture(livePts, from))
 		hal_info("%s: no picture yet\n", __func__);
 	videoDecoder->HoldPicture(false);
 	if (mAbort)

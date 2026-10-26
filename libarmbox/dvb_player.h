@@ -117,6 +117,7 @@ class cDvbPlayer : public cHwPlayer
 		int mAudioFd;
 		int mVideoFlags;
 		int mAudioFlags;
+		std::string mFallbackRate;       /* the decoder's own, back at the end */
 
 		std::mutex mQueueLock;
 		std::condition_variable mQueueCond;
