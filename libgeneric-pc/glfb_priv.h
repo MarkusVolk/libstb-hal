@@ -194,6 +194,10 @@ class GLFbPC
 		void setVideoFit(cMpvEngine *engine, const double fit[2]);
 		int mWinW; /* the window in pixels, the viewport may be smaller */
 		int mWinH;
+		/* the viewport the OSD is fitted into, in pixels, and a count of its changes */
+		std::atomic<int> mViewW;
+		std::atomic<int> mViewH;
+		std::atomic<unsigned> mViewGen;
 		bool mTexStale; /* the video was drawn directly, mVideoTex has an old frame */
 		void drawOSD();
 		uint64_t osdScan(int box[4]); /* one pass: where the OSD shows anything, and a sum of it */

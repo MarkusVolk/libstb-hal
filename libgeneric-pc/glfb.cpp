@@ -28,6 +28,7 @@
 #include <sys/types.h>
 #include <signal.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <errno.h>
@@ -103,6 +104,13 @@ void GLFramebuffer::blit()
 void GLFramebuffer::setTerminalFd(int fd)
 {
 	glfb_priv->mTermFd = fd;
+}
+
+void GLFramebuffer::getOutputSize(int &w, int &h, unsigned &generation)
+{
+	generation = glfb_priv->mViewGen;
+	w = glfb_priv->mViewW;
+	h = glfb_priv->mViewH;
 }
 
 bool GLFramebuffer::setOSDResolution(int x, int y)
@@ -210,6 +218,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mTexStale = false;
 	mDirect = false;
 	mWinW = mWinH = 0;
+	mViewW = mViewH = 0;
+	mViewGen = 0;
 	mPlaneOK = false;
 	mOnPlane = false;
 	mExternalVideo = false;
@@ -1267,6 +1277,16 @@ void GLFbPC::render()
 			engine->setDisplayFps(mode->refresh_rate);
 		mViewX = xoff;
 		mViewY = yoff;
+		/* in OSD pixels: where the screen stretches the picture, the OSD's
+		 * own shape decides the viewport, and a width in window pixels would
+		 * make the OSD wider at every turn */
+		int view_w = (int) lround(*mX * mPar), view_h = *mY;
+		if (mViewW != view_w || mViewH != view_h)
+		{
+			mViewW = view_w;
+			mViewH = view_h;
+			mViewGen++;
+		}
 		glViewport(xoff, yoff, *mX, *mY);
 		float aspect = static_cast<float>(*mX) / *mY;
 		float osdaspect = static_cast<float>(box.den) / box.num;

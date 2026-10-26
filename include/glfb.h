@@ -36,6 +36,9 @@ class GLFramebuffer : public OpenThreads::Thread
 		fb_var_screeninfo getScreenInfo() { return si; }
 		/* another size for the OSD, up to 1920x1080; the buffer stays where it is */
 		bool setOSDResolution(int x, int y);
+		/* the area of the window or screen the OSD is shown in, in pixels (0x0
+		 * before the first picture), and a count that goes up when it changes */
+		void getOutputSize(int &w, int &h, unsigned &generation);
 		/* while fd is not -1, the keyboard writes hal_term_key to it
 		 * instead of sending remote control keys */
 		void setTerminalFd(int fd);
