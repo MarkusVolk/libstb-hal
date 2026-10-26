@@ -32,6 +32,14 @@ void platform_caps(hw_caps_t *caps)
  * so the window is created without one and gets them here */
 SDL_Window *platform_create_window(int width, int height)
 {
+	/* the compositor stretches the surface over the screen; at the size of
+	 * the display mode the OSD gets a pixel of the screen for each of its own */
+	const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+	if (mode && mode->w > 0 && mode->h > 0)
+	{
+		width = mode->w;
+		height = mode->h;
+	}
 	SDL_PropertiesID props = SDL_CreateProperties();
 	SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "Neutrino");
 	SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width);
