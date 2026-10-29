@@ -803,17 +803,26 @@ uint64_t cDvbPlayer::pts()
 }
 
 /* the decoder keeps the time of the live picture until it shows one of the
- * stream; going on from a held picture, until it has reached that */
+ * stream; going on from a held picture, until it has reached that. The
+ * picture is on the screen once that time moves on: HiSilicon reports the
+ * time of a picture before it shows it, and a pause or the end of the held
+ * picture would come too early */
 bool cDvbPlayer::waitFirstPicture(uint64_t livePts, int64_t from)
 {
+	uint64_t first = 0;
 	for (int i = 0; i < 250 && !mStop && !mAbort; i++)
 	{
 		uint64_t pts = decoderPts();
 		if (pts && pts != livePts && (from < 0 || ((pts - from) & 0x1ffffffffLL) < (1LL << 32)))
-			return true;
+		{
+			if (first && pts != first)
+				return true;
+			if (!first)
+				first = pts;
+		}
 		usleep(20000);
 	}
-	return false;
+	return first != 0;
 }
 
 cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &audioUrl, const std::string &userAgent,
