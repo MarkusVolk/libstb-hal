@@ -722,8 +722,9 @@ void cVideo::HoldPicture(bool on)
 	}
 }
 
-/* the decoder does not freeze what comes from the demux, a stop that
- * keeps the picture holds it */
+/* the Broadcom decoder does not freeze what comes from the demux, a stop
+ * that keeps the picture holds it; HiSilicon blanks on a stop, whatever
+ * the zap mode, and freezes live TV */
 bool cVideo::LivePause(bool on)
 {
 	if (fd < 0 || live_paused == on)
@@ -733,7 +734,11 @@ bool cVideo::LivePause(bool on)
 		HoldPicture(true);
 		int64_t pts = GetPTS();
 		held_pts = pts > 0 ? pts : -1;
+#if BOXMODEL_HISILICON
+		if (fop(ioctl, VIDEO_FREEZE) < 0)
+#else
 		if (fop(ioctl, VIDEO_STOP, 0) < 0)
+#endif
 		{
 			HoldPicture(false);
 			return false;
