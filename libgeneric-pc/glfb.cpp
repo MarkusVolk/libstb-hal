@@ -2095,12 +2095,15 @@ uint64_t GLFbPC::osdScan(int box[4])
 		}
 		if (!(any & 0xff000000))
 			continue;
-		/* the row is in the cache now, finding its ends is cheap */
+		/* the row is in the cache now, finding its ends is cheap; neutrino
+		 * draws into it meanwhile, so the search stays inside the row */
 		int l = 0;
-		while (!(p[l] & 0xff000000))
+		while (l < w && !(p[l] & 0xff000000))
 			l++;
+		if (l == w)
+			continue;
 		int r = w - 1;
-		while (!(p[r] & 0xff000000))
+		while (r > l && !(p[r] & 0xff000000))
 			r--;
 		if (l < x0)
 			x0 = l;
