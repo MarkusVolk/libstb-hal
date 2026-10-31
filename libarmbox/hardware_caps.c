@@ -447,6 +447,7 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxarch, "HI3798MV200");
 	caps.rc_has_playpause = 1;
 	caps.multiboot_devicetree = 1;
+	caps.can_ofgwrite = 1;
 #endif
 #if BOXMODEL_HD61
 	caps.has_CI = 2;
@@ -469,6 +470,7 @@ hw_caps_t *get_hwcaps(void)
 	caps.rc_has_playpause = 1;
 	caps.rc_tvradio_combined = 1;
 	caps.multiboot_devicetree = 1;
+	caps.can_ofgwrite = 1;
 #endif
 #if BOXMODEL_MULTIBOX
 	caps.has_CI = 0;
