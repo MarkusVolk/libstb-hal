@@ -592,9 +592,6 @@ cVideo::~cVideo(void)
 	if (fd >= 0)
 		setAVInput(AUX);
 #endif
-	if (hdmi_cec::getInstance()->standby_cec_activ && fd >= 0)
-		hdmi_cec::getInstance()->SetCECState(true);
-
 	closeDevice();
 }
 
