@@ -910,8 +910,12 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, mAudioFd, std::ref(mAudioQ), std::ref(mAudioGen));
 	mPlaying = true;
 
-	if (!waitFirstPicture(livePts, from))
-		hal_info("%s: no picture yet\n", __func__);
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	bool shown = waitFirstPicture(livePts, from);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+	hal_info("%s: %s after %ld ms\n", __func__, shown ? "first picture" : "no picture yet", ms);
 	/* the held live picture of the HiSilicon boxes is the AVPLAY's, above
 	 * the emulated device, which shows its last frame of long ago until
 	 * the stream's first */
