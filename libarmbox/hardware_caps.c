@@ -314,6 +314,7 @@ hw_caps_t *get_hwcaps(void)
 	caps.pip_warmup = 1;
 	caps.can_boxmode = 1;
 	caps.multiboot_devicetree = 1;
+	caps.can_ofgwrite = 1;
 #endif
 #if BOXMODEL_BRE2ZE4K
 	caps.has_CI = 1;
