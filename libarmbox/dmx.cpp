@@ -35,6 +35,7 @@
 #include <OpenThreads/ScopedLock>
 #include "dmx_hal.h"
 #include "hal_debug.h"
+#include "hisi_live.h"
 
 #include "video_lib.h"
 /* needed for getSTC... */
@@ -130,6 +131,7 @@ typedef struct dmx_pdata
 {
 	int last_source;
 	OpenThreads::Mutex *mutex;
+	bool to_device; /* live audio the AVPLAY does not decode, see Start() */
 } dmx_pdata;
 #define P ((dmx_pdata *)pdata)
 
@@ -243,8 +245,33 @@ void cDemux::Close(void)
 	fd = -1;
 }
 
+/* the live video, audio and PCR of the HiSilicon boxes go to their AVPLAY,
+ * which takes them from a demux of its own: this one only keeps the PID */
+static int hisi_pid(int num, DMX_CHANNEL_TYPE type, bool to_device)
+{
+	int which;
+	switch (type)
+	{
+		case DMX_VIDEO_CHANNEL: which = cHisiLive::PID_VIDEO; break;
+		case DMX_AUDIO_CHANNEL: which = cHisiLive::PID_AUDIO; break;
+		case DMX_PCR_ONLY_CHANNEL: which = cHisiLive::PID_PCR; break;
+		default: return -1;
+	}
+	return !to_device && cHisiLive::forUnit(num) ? which : -1;
+}
+
 bool cDemux::Start(bool)
 {
+	if (hisi_pid(num, dmx_type, P->to_device) >= 0)
+	{
+		/* the type of the audio is known by now: AC3 and the like are
+		 * left to the emulated decoder */
+		if (dmx_type != DMX_AUDIO_CHANNEL || cHisiLive::getInstance()->DecodesAudio())
+			return true;
+		P->to_device = true;
+		if (!pesFilter(pid))
+			return false;
+	}
 	hal_debug("%s #%d fd: %d type: %s\n", __func__, num, fd, DMX_T[dmx_type]);
 	if (fd < 0)
 	{
@@ -257,6 +284,13 @@ bool cDemux::Start(bool)
 
 bool cDemux::Stop(void)
 {
+	int hisi = hisi_pid(num, dmx_type, P->to_device);
+	if (hisi >= 0)
+	{
+		cHisiLive::getInstance()->SetPid(hisi, 0);
+		return true;
+	}
+	P->to_device = false;
 	hal_debug("%s #%d fd: %d type: %s\n", __func__, num, fd, DMX_T[dmx_type]);
 	if (fd < 0)
 	{
@@ -508,6 +542,13 @@ bool cDemux::pesFilter(const unsigned short _pid)
 		return false;
 
 	hal_debug("%s #%d pid: 0x%04hx fd: %d type: %s\n", __FUNCTION__, num, pid, fd, DMX_T[dmx_type]);
+
+	int hisi = hisi_pid(num, dmx_type, P->to_device);
+	if (hisi >= 0)
+	{
+		cHisiLive::getInstance()->SetPid(hisi, pid);
+		return true;
+	}
 
 	_open(this, num, fd, P->last_source, dmx_type, buffersize);
 

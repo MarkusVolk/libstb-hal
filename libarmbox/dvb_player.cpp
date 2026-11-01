@@ -35,6 +35,7 @@ extern "C" {
 #include "audio_lib.h"
 #include "video_lib.h"
 #include "hal_debug.h"
+#include "hisi_live.h"
 #include "proc_tools.h"
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
@@ -911,6 +912,11 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 
 	if (!waitFirstPicture(livePts, from))
 		hal_info("%s: no picture yet\n", __func__);
+	/* the held live picture of the HiSilicon boxes is the AVPLAY's, above
+	 * the emulated device, which shows its last frame of long ago until
+	 * the stream's first */
+	if (cHisiLive *h = cHisiLive::getInstance())
+		h->Hide();
 	videoDecoder->HoldPicture(false);
 	if (mAbort)
 	{

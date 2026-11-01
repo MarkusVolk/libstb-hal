@@ -446,6 +446,7 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "AX");
 	strcpy(caps.boxname, "HD60");
 	strcpy(caps.boxarch, "HI3798MV200");
+	caps.can_hisi_avplay = 1;
 	caps.rc_has_playpause = 1;
 	caps.multiboot_devicetree = 1;
 	caps.can_ofgwrite = 1;
@@ -468,6 +469,7 @@ hw_caps_t *get_hwcaps(void)
 	strcpy(caps.boxvendor, "AX");
 	strcpy(caps.boxname, "HD61");
 	strcpy(caps.boxarch, "HI3798MV200");
+	caps.can_hisi_avplay = 1;
 	caps.rc_has_playpause = 1;
 	caps.rc_tvradio_combined = 1;
 	caps.multiboot_devicetree = 1;

@@ -13,6 +13,7 @@ box_sources = files(
 	'dmx.cpp',
 	'dvb_player.cpp',
 	'hdmi_cec.cpp',
+	'hisi_live.cpp',
 	'init.cpp',
 	'playback_libeplayer3.cpp',
 	'record.cpp',
@@ -20,7 +21,7 @@ box_sources = files(
 )
 box_args = ['-D__STDC_FORMAT_MACROS', '-D__STDC_CONSTANT_MACROS', '-D_FILE_OFFSET_BITS=64']
 box_inc = [config_inc, hal_inc, include_directories('../common', '.'), eplayer3_inc_public]
-box_deps = [threads_dep, rt_dep, dependency('openthreads'), ffmpeg_deps]
+box_deps = [threads_dep, rt_dep, dependency('openthreads'), ffmpeg_deps, meson.get_compiler('c').find_library('dl', required : false)]
 
 if boxtype == 'armbox'
 	libbox = static_library('armbox',
