@@ -876,7 +876,9 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 	{
 		int64_t ts = av_rescale_q(held, AVRational{1, 90000}, vst->time_base);
 		int64_t wrap = av_rescale_q(1LL << 33, AVRational{1, 90000}, vst->time_base);
-		if (vst->start_time != AV_NOPTS_VALUE && ts < vst->start_time)
+		/* far before the start, the clock wrapped; shortly before, the
+		 * recording began after the held picture, with the hold */
+		if (vst->start_time != AV_NOPTS_VALUE && ts < vst->start_time - wrap / 2)
 			ts += wrap;
 		hal_info("%s: from the held picture at %lld\n", __func__, (long long)held);
 		/* a stream that refreshes its picture over a while, without real
