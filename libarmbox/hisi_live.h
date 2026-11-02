@@ -18,6 +18,7 @@
 #define __HISI_LIVE_H__
 
 #include <stdint.h>
+#include <functional>
 
 class cHisiLive
 {
@@ -45,6 +46,23 @@ class cHisiLive
 		int64_t GetPts();
 		/* false while live video is off: the emulated device knows then */
 		bool PictureInfo(int &width, int &height, int &rate_mhz);
+		/* Neutrino's screen formats: 1 4:3, 2 14:9, 3 16:9 */
+		void SetScreenAspect(int aspect);
+		/* Neutrino's aspect modes: letterbox, panscan, bestfit, nonlinear */
+		void SetAspectMode(int mode);
+		/* in the 720x576 plane of /proc/stb/vmpeg, a width of 0 is the whole screen */
+		void SetWindowRect(int x, int y, int w, int h);
+		/* the picture shown, semiplanar 4:2:0, handed to use while it is mapped */
+		struct Frame
+		{
+			const uint8_t *y;
+			int y_stride;
+			const uint8_t *c;
+			int c_stride;
+			int width, height;
+			bool nv12;
+		};
+		bool Capture(const std::function<bool(const Frame &)> &use);
 		/* gives AVPLAY, window, track and demux back */
 		void Close();
 

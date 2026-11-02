@@ -657,10 +657,14 @@ int cVideo::setAspectRatio(int aspect, int mode)
 		n = proc_put("/proc/stb/video/aspect", a[aspect], strlen(a[aspect]));
 		if (n < 0)
 			hal_info("%s: proc_put /proc/stb/video/aspect (%m)\n", __func__);
+		if (cHisiLive *h = cHisiLive::forUnit(devnum))
+			h->SetScreenAspect(aspect);
 	}
 
 	if (mode == -1)
 		return 0;
+	if (cHisiLive *h = cHisiLive::forUnit(devnum))
+		h->SetAspectMode(mode);
 #if BOXMODEL_OSMIO4K || BOXMODEL_OSMIO4KPLUS
 	hal_debug("%s: /proc/stb/video/policy2 -> %s\n", __func__, m[mo]);
 	n = proc_put("/proc/stb/video/policy2", m[mo], strlen(m[mo]));
@@ -1098,7 +1102,9 @@ void cVideo::Pig(int x, int y, int w, int h, int osd_w, int osd_h, int startx, i
 	int xres = 720; /* proc_get_hex("/proc/stb/vmpeg/0/xres") */
 	int yres = 576; /* proc_get_hex("/proc/stb/vmpeg/0/yres") */
 	hal_debug("#%d %s: x:%d y:%d w:%d h:%d ow:%d oh:%d\n", devnum, __func__, x, y, w, h, osd_w, osd_h);
-	if (x == -1 && y == -1 && w == -1 && h == -1)
+	bool whole = x == -1 && y == -1 && w == -1 && h == -1;
+	bool parked = x == -2 && y == -2 && w == -2 && h == -2;
+	if (whole)
 	{
 		_w = xres;
 		_h = yres;
@@ -1149,6 +1155,15 @@ void cVideo::Pig(int x, int y, int w, int h, int osd_w, int osd_h, int startx, i
 
 	sprintf(buffer, "%x", 1);
 	proc_put(VMPEG_dst_apply[devnum], buffer, strlen(buffer));
+
+	/* the emulated device keeps it for the players */
+	if (cHisiLive *live = cHisiLive::forUnit(devnum))
+	{
+		if (whole)
+			live->SetWindowRect(0, 0, 0, 0);
+		else if (!parked)
+			live->SetWindowRect(_x, _y, _w, _h);
+	}
 }
 
 static inline int rate2csapi(int rate)
@@ -1572,6 +1587,25 @@ inline void rgb24torgb32(unsigned char *src, unsigned char *dest, int picsize)
 }
 
 /* TODO: aspect ratio correction and PIP */
+/* the picture of the AVPLAY on the HiSilicon boxes, which video0 lacks */
+static bool getvideo_hisi(cHisiLive *h, unsigned char *video, int xres, int yres)
+{
+	return h->Capture([&](const cHisiLive::Frame &f)
+	{
+		struct SwsContext *sws = sws_getContext(f.width, f.height, f.nv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_NV21,
+							xres, yres, AV_PIX_FMT_BGR24, SWS_BICUBIC, NULL, NULL, NULL);
+		if (!sws)
+			return false;
+		const uint8_t *src[4] = { f.y, f.c, NULL, NULL };
+		const int src_stride[4] = { f.y_stride, f.c_stride, 0, 0 };
+		uint8_t *dst[4] = { video, NULL, NULL, NULL };
+		const int dst_stride[4] = { xres * 3, 0, 0, 0 };
+		sws_scale(sws, src, src_stride, 0, f.height, dst, dst_stride);
+		sws_freeContext(sws);
+		return true;
+	});
+}
+
 bool cVideo::GetScreenImage(unsigned char *&out_data, int &xres, int &yres, bool get_video, bool get_osd, bool scale_to_video)
 {
 #define VDEC_PIXFMT AV_PIX_FMT_BGR24
@@ -1614,7 +1648,8 @@ bool cVideo::GetScreenImage(unsigned char *&out_data, int &xres, int &yres, bool
 		unsigned char *video_src = (unsigned char *)malloc(grab_w * grab_h * 3);
 		if (video_src == NULL)
 			return false;
-		if (getvideo2(video_src, grab_w, grab_h) == false)
+		cHisiLive *h = cHisiLive::forUnit(devnum);
+		if (!(h && getvideo_hisi(h, video_src, grab_w, grab_h)) && !getvideo2(video_src, grab_w, grab_h))
 		{
 			free(out_data);
 			free(video_src);

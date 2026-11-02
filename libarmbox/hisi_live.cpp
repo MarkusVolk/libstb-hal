@@ -64,6 +64,13 @@ template <typename T> struct filled
 	F(HI_UNF_VO_SetWindowEnable, (hi_handle, hi_bool)) \
 	F(HI_UNF_VO_SetWindowZorder, (hi_handle, hi_u32)) \
 	F(HI_UNF_VO_ResetWindow, (hi_handle, hi_u32)) \
+	F(HI_UNF_VO_GetWindowAttr, (hi_handle, hi_window_attr *)) \
+	F(HI_UNF_VO_SetWindowAttr, (hi_handle, const hi_window_attr *)) \
+	F(HI_UNF_DISP_GetVirtualScreen, (hi_u32, hi_u32 *, hi_u32 *)) \
+	F(HI_UNF_DISP_SetAspectRatio, (hi_u32, hi_disp_aspect_ratio *)) \
+	F(HI_UNF_VO_CapturePicture, (hi_handle, hi_video_frame_info *)) \
+	F(HI_UNF_VO_CapturePictureRelease, (hi_handle, hi_video_frame_info *)) \
+	F(HI_MMZ_Unmap, (hi_u32)) \
 	F(HI_UNF_SND_Init, (void)) \
 	F(HI_UNF_SND_GetDefaultOpenAttr, (hi_u32, hi_snd_attr *)) \
 	F(HI_UNF_SND_Open, (hi_u32, const hi_snd_attr *)) \
@@ -105,6 +112,7 @@ struct cHisiLive::priv
 	/* AC3, E-AC3 and DTS through libHA.AUDIO.MULTI and the vendor's FFmpeg
 	 * 3, as the vendor service decodes them */
 	hi_s32 (*multi_config)(void *, hi_s32 *) = nullptr;
+	void *(*mmz_map)(hi_u32, hi_u32) = nullptr;
 };
 
 /* a library of the vendor: it finds its own ones through its run path
@@ -199,6 +207,7 @@ bool cHisiLive::Init()
 	}
 	HISI_FUNCTIONS
 #undef F
+	*(void **)&p->mmz_map = dlsym(RTLD_DEFAULT, "HI_MMZ_Map");
 
 #define CHECK(call) \
 	if (hi_s32 r_ = (call)) \
@@ -542,6 +551,88 @@ bool cHisiLive::PictureInfo(int &width, int &height, int &rate_mhz)
 	rate_mhz = info.fps_integer * 1000 + info.fps_decimal;
 	hal_debug("hisi live: %ux%u at %u.%03u fps\n", info.width, info.height, info.fps_integer, info.fps_decimal);
 	return true;
+}
+
+/* Neutrino's screens: 4:3, 14:9, 16:9; the window converts to the
+ * display's, which the emulated device's /proc/stb/video/aspect leaves */
+void cHisiLive::SetScreenAspect(int aspect)
+{
+	hi_disp_aspect_ratio r = { 0, 0, 0 };
+	switch (aspect)
+	{
+		case 1: r.aspect_ratio = HI_UNF_DISP_ASPECT_RATIO_4TO3; break;
+		case 2: r = { HI_UNF_DISP_ASPECT_RATIO_USER, 14, 9 }; break;
+		case 3: r.aspect_ratio = HI_UNF_DISP_ASPECT_RATIO_16TO9; break;
+		default: return;
+	}
+	std::lock_guard<std::mutex> lock(p->mutex);
+	if (p->HI_UNF_DISP_SetAspectRatio(HI_UNF_DISPLAY1, &r) != HI_SUCCESS)
+		hal_info("hisi live: screen aspect %d not set\n", aspect);
+}
+
+/* Neutrino's modes: letterbox, panscan, bestfit, nonlinear */
+void cHisiLive::SetAspectMode(int mode)
+{
+	static const hi_u32 cvrs[] = { HI_UNF_VO_ASPECT_CVRS_LETTERBOX, HI_UNF_VO_ASPECT_CVRS_PAN_SCAN,
+		HI_UNF_VO_ASPECT_CVRS_COMBINED, HI_UNF_VO_ASPECT_CVRS_IGNORE };
+	if (mode < 0 || mode > 3)
+		return;
+	std::lock_guard<std::mutex> lock(p->mutex);
+	filled<hi_window_attr> attr;
+	if (p->HI_UNF_VO_GetWindowAttr(p->window, &attr.v) != HI_SUCCESS)
+		return;
+	attr.v.aspect_cvrs = cvrs[mode];
+	if (p->HI_UNF_VO_SetWindowAttr(p->window, &attr.v) != HI_SUCCESS)
+		hal_info("hisi live: aspect conversion %u not set\n", cvrs[mode]);
+}
+
+/* in the PAL plane of the emulated device's /proc/stb/vmpeg, the whole
+ * screen with a width of 0 */
+void cHisiLive::SetWindowRect(int x, int y, int w, int h)
+{
+	std::lock_guard<std::mutex> lock(p->mutex);
+	filled<hi_window_attr> attr;
+	if (p->HI_UNF_VO_GetWindowAttr(p->window, &attr.v) != HI_SUCCESS)
+		return;
+	hi_u32 vw = 1280, vh = 720;
+	p->HI_UNF_DISP_GetVirtualScreen(HI_UNF_DISPLAY1, &vw, &vh);
+	hi_rect &r = attr.v.output_rect;
+	if (w <= 0 || h <= 0)
+		r = { 0, 0, 0, 0 };
+	else
+		r = { (hi_s32)(x * vw / 720), (hi_s32)(y * vh / 576), (hi_s32)(w * vw / 720), (hi_s32)(h * vh / 576) };
+	if (p->HI_UNF_VO_SetWindowAttr(p->window, &attr.v) != HI_SUCCESS)
+		hal_info("hisi live: window %d,%d %dx%d not set\n", r.x, r.y, r.width, r.height);
+}
+
+bool cHisiLive::Capture(const std::function<bool(const Frame &)> &use)
+{
+	std::lock_guard<std::mutex> lock(p->mutex);
+	if (!p->video_running)
+		return false;
+	filled<hi_video_frame_info> info;
+	hi_video_frame_info &f = info.v;
+	if (p->HI_UNF_VO_CapturePicture(p->window, &f) != HI_SUCCESS)
+		return false;
+	bool ok = false;
+	const hi_video_frame_addr &a = f.addr[0];
+	if (f.video_format == HI_UNF_FORMAT_YUV_SEMIPLANAR_420 || f.video_format == HI_UNF_FORMAT_YUV_SEMIPLANAR_420_UV)
+	{
+		void *y = p->mmz_map ? p->mmz_map(a.y_addr, 0) : NULL;
+		void *c = p->mmz_map ? p->mmz_map(a.c_addr, 0) : NULL;
+		if (y && c)
+		{
+			Frame frame = { (const uint8_t *)y, (int)a.y_stride, (const uint8_t *)c, (int)a.c_stride,
+				(int)f.width, (int)f.height, f.video_format == HI_UNF_FORMAT_YUV_SEMIPLANAR_420_UV };
+			ok = use(frame);
+		}
+		if (c)
+			p->HI_MMZ_Unmap(a.c_addr);
+		if (y)
+			p->HI_MMZ_Unmap(a.y_addr);
+	}
+	p->HI_UNF_VO_CapturePictureRelease(p->window, &f);
+	return ok;
 }
 
 void cHisiLive::Close()

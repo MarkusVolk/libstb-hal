@@ -58,8 +58,16 @@ typedef int32_t hi_bool;
 
 /* display, video output, demux, sound */
 #define HI_UNF_DISPLAY1 1
+#define HI_UNF_FORMAT_YUV_SEMIPLANAR_420 1
+#define HI_UNF_FORMAT_YUV_SEMIPLANAR_420_UV 6
+#define HI_UNF_DISP_ASPECT_RATIO_4TO3 1
+#define HI_UNF_DISP_ASPECT_RATIO_16TO9 2
+#define HI_UNF_DISP_ASPECT_RATIO_USER 4
 #define HI_UNF_VO_DEV_MODE_NORMAL 0
 #define HI_UNF_VO_ASPECT_CVRS_IGNORE 0
+#define HI_UNF_VO_ASPECT_CVRS_LETTERBOX 1
+#define HI_UNF_VO_ASPECT_CVRS_PAN_SCAN 2
+#define HI_UNF_VO_ASPECT_CVRS_COMBINED 3
 #define HI_LAYER_ZORDER_MOVETOP 0
 #define HI_UNF_WINDOW_FREEZE_MODE_BLACK 1
 #define HI_UNF_DMX_PORT_TSI_0 0x20
@@ -127,6 +135,34 @@ typedef struct
 	hi_u32 type;
 	hi_hadecode_openparam decode_param;
 } hi_acodec_attr;
+
+typedef struct
+{
+	hi_u32 y_addr;
+	hi_u32 c_addr;
+	hi_u32 cr_addr;
+	hi_u32 y_stride;
+	hi_u32 c_stride;
+	hi_u32 cr_stride;
+} hi_video_frame_addr;
+
+typedef struct
+{
+	hi_u32 frame_index;
+	hi_video_frame_addr addr[2];
+	hi_u32 width;
+	hi_u32 height;
+	hi_u32 rest1[6];
+	hi_u32 video_format;
+	hi_u32 rest2[76];
+} hi_video_frame_info;
+
+typedef struct
+{
+	hi_u32 aspect_ratio;
+	hi_u32 user_width;
+	hi_u32 user_height;
+} hi_disp_aspect_ratio;
 
 typedef struct
 {
@@ -215,6 +251,10 @@ HISI_LAYOUT(hi_pcm_format, 48);
 HISI_LAYOUT(hi_hadecode_openparam, 60);
 HISI_LAYOUT(hi_acodec_attr, 64);
 HISI_LAYOUT(hi_window_attr, 80);
+HISI_LAYOUT(hi_disp_aspect_ratio, 12);
+HISI_LAYOUT(hi_video_frame_addr, 24);
+HISI_LAYOUT(hi_video_frame_info, 392);
+static_assert(offsetof(hi_video_frame_info, width) == 52 && offsetof(hi_video_frame_info, video_format) == 84, "frame info");
 static_assert(offsetof(hi_window_attr, aspect_cvrs) == 12 && offsetof(hi_window_attr, output_rect) == 64, "window");
 HISI_LAYOUT(hi_avplay_stop_opt, 8);
 HISI_LAYOUT(hi_avplay_status_info, 272);
