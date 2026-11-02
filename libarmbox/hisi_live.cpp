@@ -435,6 +435,9 @@ bool cHisiLive::StartVideo()
 		return false;
 	}
 	p->video_running = true;
+	/* the start thaws the window; the held picture is still its last */
+	if (p->hold_last)
+		p->HI_UNF_VO_FreezeWindow(p->window, 1, HI_UNF_WINDOW_FREEZE_MODE_LAST);
 	std::thread(&cHisiLive::Reveal, this, ++p->start_count).detach();
 	return true;
 }
