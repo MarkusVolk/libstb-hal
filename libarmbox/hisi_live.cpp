@@ -282,11 +282,16 @@ bool cHisiLive::Init()
 			found = true;
 		}
 	}
-	if (!found)
+	/* the vendor service may attach them all to the tuner at its start;
+	 * the last one is the one the emulated devices use last */
+	if (!found && cap.dmx_num)
 	{
-		hal_info("hisi live: no free demux of %u\n", cap.dmx_num);
-		return false;
+		p->dmx = cap.dmx_num - 1;
+		found = true;
+		hal_info("hisi live: no free demux of %u, demux %u is shared\n", cap.dmx_num, p->dmx);
 	}
+	if (!found)
+		return false;
 	if (FILE *f = fopen(HISI_DEMUX_FILE, "w"))
 	{
 		fprintf(f, "%u\n", p->dmx);
