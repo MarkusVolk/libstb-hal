@@ -155,6 +155,7 @@ class cVideo
 {
 		friend class cPlayback;
 		friend class cDvbPlayer;
+		friend class cDeviceSink;
 		friend class cDemux;
 	private:
 		/* video device */

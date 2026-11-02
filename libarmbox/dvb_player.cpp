@@ -12,19 +12,10 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-#include <linux/dvb/audio.h>
-#include <linux/dvb/video.h>
-
-#ifndef AUDIO_GET_PTS
-#define AUDIO_GET_PTS _IOR('o', 19, __u64)
-#endif
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -32,11 +23,11 @@ extern "C" {
 }
 
 #include "dvb_player.h"
+#include "dvb_sink.h"
 #include "audio_lib.h"
 #include "video_lib.h"
 #include "hal_debug.h"
 #include "hisi_live.h"
-#include "proc_tools.h"
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
 #define hal_info(args...)  _hal_info(HAL_DEBUG_PLAYBACK, this, args)
@@ -46,22 +37,6 @@ extern cVideo *videoDecoder;
 
 namespace
 {
-
-/* VIDEO_SET_STREAMTYPE and AUDIO_SET_BYPASS_MODE of this decoder */
-enum
-{
-	STREAM_MPEG2 = 0,
-	STREAM_H264 = 1,
-	STREAM_MPEG1 = 6,
-	STREAM_H265 = 7,
-	STREAM_H265_ALT = 22,
-	BYPASS_AC3 = 0,
-	BYPASS_MPEG = 1,
-	BYPASS_MP3 = 0xa,
-	BYPASS_AAC_ADTS = 0xb,
-	BYPASS_EAC3 = 0x22,
-	BYPASS_EAC3_ALT = 7
-};
 
 const uint8_t PES_VIDEO = 0xe0;
 const uint8_t PES_AUDIO = 0xc0;
@@ -73,7 +48,6 @@ const size_t AUDIO_QUEUE_BYTES = 1 << 20;
 /* how long the end of a recording that is still written waits for more */
 const int GROW_WAIT_MS = 3000;
 const int HELD_LEAD_MS = 2000;
-const char *FALLBACK_RATE = "/proc/stb/vmpeg/0/fallback_framerate";
 #if BOXMODEL_HD51 || BOXMODEL_BRE2ZE4K || BOXMODEL_H7
 /* the BCM7251S decodes H.264 only up to HD; beyond, picture and clock stand still */
 const int H264_MAX_WIDTH = 1920;
@@ -207,7 +181,7 @@ cDvbPlayer::cDvbPlayer()
 	  mBytes(0), mSeekReq(false), mSeekTarget(0), mGrowing(false), mFollow(false), mDemuxDone(false), mAudioFrom(-1), mFd(-1),
 	  mIo(NULL), mFmt(NULL), mAudioFmt(NULL), mAudioSeekReq(false), mVideoIdx(-1), mAudioIdx(-1), mAudioId(-1), mWantAudio(-1),
 	  mVideoType(-1), mAudioType(-1), mAdts(false), mSpsSeen(false), mStart90(0),
-	  mVideoFd(-1), mAudioFd(-1), mVideoFlags(0), mAudioFlags(0), mGen(0), mVideoGen(0), mAudioGen(0)
+	  mSink(newDeviceSink()), mGen(0), mVideoGen(0), mAudioGen(0)
 {
 	mVideoQ.limit = VIDEO_QUEUE_BYTES;
 	mAudioQ.limit = AUDIO_QUEUE_BYTES;
@@ -439,67 +413,15 @@ void cDvbPlayer::setupDecoders()
 	videoDecoder->HoldPicture(true);
 	videoDecoder->Stop(false);
 	audioDecoder->Stop();
-	mVideoFd = videoDecoder->fd;
-	mAudioFd = audioDecoder->fd;
-
 	AVStream *vst = mFmt->streams[mVideoIdx];
 	int rate = fallbackRate(vst->avg_frame_rate.num > 0 ? vst->avg_frame_rate : vst->r_frame_rate);
-	char old[16];
-	mFallbackRate.clear();
-	if (rate && proc_get(FALLBACK_RATE, old, sizeof(old)) > 0)
-	{
-		mFallbackRate = old;
-		std::string val = std::to_string(rate);
-		proc_put(FALLBACK_RATE, val.c_str(), val.size());
-	}
-	if (mVideoFd >= 0)
-	{
-		mVideoFlags = fcntl(mVideoFd, F_GETFL);
-		fcntl(mVideoFd, F_SETFL, mVideoFlags | O_NONBLOCK);
-		ioctl(mVideoFd, VIDEO_SELECT_SOURCE, VIDEO_SOURCE_MEMORY);
-		if (ioctl(mVideoFd, VIDEO_SET_STREAMTYPE, mVideoType) < 0 && mVideoType == STREAM_H265)
-			ioctl(mVideoFd, VIDEO_SET_STREAMTYPE, STREAM_H265_ALT);
-		ioctl(mVideoFd, VIDEO_PLAY);
-		ioctl(mVideoFd, VIDEO_CONTINUE);
-		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
-	}
-	if (mAudioFd >= 0 && mAudioIdx >= 0)
-	{
-		mAudioFlags = fcntl(mAudioFd, F_GETFL);
-		fcntl(mAudioFd, F_SETFL, mAudioFlags | O_NONBLOCK);
-		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
-		ioctl(mAudioFd, AUDIO_SELECT_SOURCE, AUDIO_SOURCE_MEMORY);
-		if (ioctl(mAudioFd, AUDIO_SET_BYPASS_MODE, mAudioType) < 0 && mAudioType == BYPASS_EAC3)
-			ioctl(mAudioFd, AUDIO_SET_BYPASS_MODE, BYPASS_EAC3_ALT);
-		ioctl(mAudioFd, AUDIO_SET_AV_SYNC, 1);
-		ioctl(mAudioFd, AUDIO_PLAY);
-		ioctl(mAudioFd, AUDIO_CONTINUE);
-	}
+	mSink->open(mVideoType, mAudioType, mAudioIdx >= 0, rate);
 }
 
 void cDvbPlayer::releaseDecoders()
 {
 	videoDecoder->HoldPicture(false);
-	if (!mFallbackRate.empty())
-		proc_put(FALLBACK_RATE, mFallbackRate.c_str(), mFallbackRate.size());
-	mFallbackRate.clear();
-	if (mVideoFd >= 0)
-	{
-		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
-		ioctl(mVideoFd, VIDEO_STOP, 0);
-		ioctl(mVideoFd, VIDEO_SLOWMOTION, 0);
-		ioctl(mVideoFd, VIDEO_FAST_FORWARD, 0);
-		ioctl(mVideoFd, VIDEO_SELECT_SOURCE, VIDEO_SOURCE_DEMUX);
-		fcntl(mVideoFd, F_SETFL, mVideoFlags);
-	}
-	if (mAudioFd >= 0 && mAudioIdx >= 0)
-	{
-		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
-		ioctl(mAudioFd, AUDIO_STOP);
-		ioctl(mAudioFd, AUDIO_SELECT_SOURCE, AUDIO_SOURCE_DEMUX);
-		fcntl(mAudioFd, F_SETFL, mAudioFlags);
-	}
-	mVideoFd = mAudioFd = -1;
+	mSink->close();
 }
 
 int64_t cDvbPlayer::pts90(const AVPacket *pkt, const AVStream *st) const
@@ -522,14 +444,15 @@ bool cDvbPlayer::videoPes(AVPacket *pkt, std::vector<uint8_t> &pes)
 		return true;
 	}
 	bool hevc = mVideoType == STREAM_H265;
-	pesHeader(pes, -1, PES_VIDEO, pts, true);
+	bool fake = mSink->fakeStartCode();
+	pesHeader(pes, -1, PES_VIDEO, pts, fake);
 	/* the parameter sets once in front, should the stream bring none */
 	if (!mSpsSeen)
 		mSpsSeen = hasParameterSet(pkt->data, pkt->size, hevc);
 	AVCodecParameters *par = st->codecpar;
 	if (!mSpsSeen && par->extradata_size > 4 && par->extradata[0] == 0)
 		pes.insert(pes.end(), par->extradata, par->extradata + par->extradata_size);
-	if (hevc)
+	if (hevc && fake)
 		pes.push_back(0x00);
 	pes.insert(pes.end(), pkt->data, pkt->data + pkt->size);
 	return true;
@@ -574,7 +497,7 @@ void cDvbPlayer::push(Queue &q, std::vector<uint8_t> &pes)
 	mQueueCond.notify_all();
 }
 
-void cDvbPlayer::writeLoop(int fd, Queue &q, unsigned &gen)
+void cDvbPlayer::writeLoop(bool video, Queue &q, unsigned &gen)
 {
 	std::unique_lock<std::mutex> lock(mQueueLock);
 	while (!mStop)
@@ -596,7 +519,7 @@ void cDvbPlayer::writeLoop(int fd, Queue &q, unsigned &gen)
 		size_t off = 0;
 		while (off < pes.size() && !mStop && g == mGen)
 		{
-			ssize_t n = write(fd, pes.data() + off, pes.size() - off);
+			ssize_t n = mSink->write(video, pes.data() + off, pes.size() - off);
 			if (n > 0)
 				off += n;
 			else if (n < 0 && errno != EAGAIN && errno != EINTR)
@@ -604,8 +527,7 @@ void cDvbPlayer::writeLoop(int fd, Queue &q, unsigned &gen)
 			else if (n == 0 || errno == EAGAIN)
 			{
 				/* a short wait, so that a stop or flush is seen */
-				struct pollfd pfd = { fd, POLLOUT, 0 };
-				poll(&pfd, 1, 20);
+				mSink->wait(video, 20);
 			}
 		}
 
@@ -627,18 +549,12 @@ void cDvbPlayer::flush()
 		mQueueCond.notify_all();
 	}
 	/* a write the decoder holds back ends with its buffer cleared */
-	if (mVideoFd >= 0)
-		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
-	if (mAudioFd >= 0 && mAudioIdx >= 0)
-		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+	mSink->clear();
 	{
 		std::unique_lock<std::mutex> lock(mQueueLock);
 		mQueueCond.wait(lock, [&] { return mStop || (mVideoGen == mGen && (mAudioIdx < 0 || mAudioGen == mGen)); });
 	}
-	if (mVideoFd >= 0)
-		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
-	if (mAudioFd >= 0 && mAudioIdx >= 0)
-		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+	mSink->clear();
 }
 
 void cDvbPlayer::doSeek()
@@ -789,12 +705,7 @@ void cDvbPlayer::demuxLoop()
 
 uint64_t cDvbPlayer::decoderPts()
 {
-	int64_t pts = 0;
-	if (mVideoFd >= 0 && ioctl(mVideoFd, VIDEO_GET_PTS, &pts) == 0 && pts > 0)
-		return pts;
-	if (mAudioFd >= 0 && mAudioIdx >= 0 && ioctl(mAudioFd, AUDIO_GET_PTS, &pts) == 0 && pts > 0)
-		return pts;
-	return 0;
+	return mSink->pts();
 }
 
 uint64_t cDvbPlayer::pts()
@@ -907,9 +818,9 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 	mDemuxThread = std::thread(&cDvbPlayer::demuxLoop, this);
 	if (mAudioFmt && mAudioIdx >= 0)
 		mAudioDemuxThread = std::thread(&cDvbPlayer::audioDemuxLoop, this);
-	mVideoThread = std::thread(&cDvbPlayer::writeLoop, this, mVideoFd, std::ref(mVideoQ), std::ref(mVideoGen));
+	mVideoThread = std::thread(&cDvbPlayer::writeLoop, this, true, std::ref(mVideoQ), std::ref(mVideoGen));
 	if (mAudioIdx >= 0)
-		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, mAudioFd, std::ref(mAudioQ), std::ref(mAudioGen));
+		mAudioThread = std::thread(&cDvbPlayer::writeLoop, this, false, std::ref(mAudioQ), std::ref(mAudioGen));
 	mPlaying = true;
 
 	struct timespec t0, t1;
@@ -935,10 +846,8 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 void cDvbPlayer::stop()
 {
 	setAndWake(mStop);
-	if (mVideoFd >= 0)
-		ioctl(mVideoFd, VIDEO_CLEAR_BUFFER);
-	if (mAudioFd >= 0 && mAudioIdx >= 0)
-		ioctl(mAudioFd, AUDIO_CLEAR_BUFFER);
+	if (mPlaying)
+		mSink->clear();
 	if (mDemuxThread.joinable())
 		mDemuxThread.join();
 	if (mAudioDemuxThread.joinable())
@@ -976,19 +885,7 @@ bool cDvbPlayer::setPaused(bool paused)
 {
 	if (!mPlaying)
 		return false;
-	if (paused)
-	{
-		ioctl(mVideoFd, VIDEO_FREEZE);
-		if (mAudioIdx >= 0)
-			ioctl(mAudioFd, AUDIO_PAUSE);
-	}
-	else
-	{
-		ioctl(mVideoFd, VIDEO_FAST_FORWARD, 0);
-		ioctl(mVideoFd, VIDEO_CONTINUE);
-		if (mAudioIdx >= 0)
-			ioctl(mAudioFd, AUDIO_CONTINUE);
-	}
+	mSink->pause(paused);
 	mPaused = paused;
 	return true;
 }
@@ -1015,8 +912,7 @@ void cDvbPlayer::setTrick(bool on)
 	if (mTrick == on || !mPlaying)
 		return;
 	mTrick = on;
-	if (mAudioIdx >= 0)
-		ioctl(mAudioFd, AUDIO_SET_AV_SYNC, on ? 0 : 1);
+	mSink->trick(on);
 }
 
 bool cDvbPlayer::position(int64_t &posMs, int64_t &durMs)

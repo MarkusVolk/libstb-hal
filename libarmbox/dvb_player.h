@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -22,6 +23,7 @@ struct AVFormatContext;
 struct AVIOContext;
 struct AVPacket;
 struct AVStream;
+class cDvbSink;
 
 class cDvbPlayer : public cHwPlayer
 {
@@ -74,7 +76,7 @@ class cDvbPlayer : public cHwPlayer
 		void setupDecoders();
 		void releaseDecoders();
 		void demuxLoop();
-		void writeLoop(int fd, Queue &q, unsigned &gen);
+		void writeLoop(bool video, Queue &q, unsigned &gen);
 		void doSeek();
 		void flush();
 		bool videoPes(AVPacket *pkt, std::vector<uint8_t> &pes);
@@ -113,11 +115,7 @@ class cDvbPlayer : public cHwPlayer
 		bool mAdts;
 		bool mSpsSeen;
 		int64_t mStart90;                 /* the start of the stream, the decoder gets its own times */
-		int mVideoFd;
-		int mAudioFd;
-		int mVideoFlags;
-		int mAudioFlags;
-		std::string mFallbackRate;       /* the decoder's own, back at the end */
+		std::unique_ptr<cDvbSink> mSink;
 
 		std::mutex mQueueLock;
 		std::condition_variable mQueueCond;
