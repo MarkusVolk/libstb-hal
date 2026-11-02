@@ -71,6 +71,7 @@ class cHisiLive
 		bool Init();
 		bool AttachDemux();
 		void SetSync(unsigned ref);
+		void Reveal(unsigned start);
 		struct priv;
 		priv *p = nullptr;
 };

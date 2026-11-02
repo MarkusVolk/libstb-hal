@@ -14,6 +14,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <mutex>
+#include <thread>
 #include <time.h>
 #include <unistd.h>
 
@@ -64,6 +65,7 @@ template <typename T> struct filled
 	F(HI_UNF_VO_SetWindowEnable, (hi_handle, hi_bool)) \
 	F(HI_UNF_VO_SetWindowZorder, (hi_handle, hi_u32)) \
 	F(HI_UNF_VO_ResetWindow, (hi_handle, hi_u32)) \
+	F(HI_UNF_VO_FreezeWindow, (hi_handle, hi_bool, hi_u32)) \
 	F(HI_UNF_VO_GetWindowAttr, (hi_handle, hi_window_attr *)) \
 	F(HI_UNF_VO_SetWindowAttr, (hi_handle, const hi_window_attr *)) \
 	F(HI_UNF_DISP_GetVirtualScreen, (hi_u32, hi_u32 *, hi_u32 *)) \
@@ -79,6 +81,7 @@ template <typename T> struct filled
 	F(HI_UNF_SND_DestroyTrack, (hi_handle)) \
 	F(HI_UNF_SND_Attach, (hi_handle, hi_handle)) \
 	F(HI_UNF_SND_Detach, (hi_handle, hi_handle)) \
+	F(HI_UNF_SND_SetTrackMute, (hi_handle, hi_bool)) \
 	F(HI_UNF_AVPLAY_Init, (void)) \
 	F(HI_UNF_AVPLAY_RegisterAcodecLib, (const char *)) \
 	F(HI_UNF_AVPLAY_GetDefaultConfig, (hi_avplay_attr *, hi_u32)) \
@@ -109,6 +112,10 @@ struct cHisiLive::priv
 	int video_format = FORMAT_MPEG2;
 	int audio_type = AUDIO_MPEG;
 	bool video_running = false, audio_running = false, shown = false;
+	/* a start shows the window frozen, black or with the last picture,
+	 * until audio and video are in sync; each start counts up */
+	bool hold_last = false;
+	unsigned start_count = 0;
 	/* AC3, E-AC3 and DTS through libHA.AUDIO.MULTI and the vendor's FFmpeg
 	 * 3, as the vendor service decodes them */
 	hi_s32 (*multi_config)(void *, hi_s32 *) = nullptr;
@@ -138,6 +145,7 @@ static long long now_ms()
 /* with HAL_HISI_DEBUG: the time to the first frame and the frames in each
  * quarter second after a start, which shows a slow start */
 static std::atomic<long long> video_start(0);
+static std::atomic<bool> first_frame(false);
 static std::atomic<unsigned> frame_bins[12];
 static bool debug_frames;
 
@@ -148,7 +156,10 @@ static hi_s32 on_event(hi_handle, hi_u32 event, hi_u32)
 		return HI_SUCCESS;
 	long long t = now_ms() - start;
 	if (event == AVPLAY_EVENT_FIRST_FRAME_DISPLAYED)
+	{
+		first_frame = true;
 		hal_info("hisi live: first frame after %lld ms\n", t);
+	}
 	else if (event == AVPLAY_EVENT_NEW_VID_FRAME && debug_frames)
 	{
 		if (t < 3000)
@@ -330,9 +341,9 @@ bool cHisiLive::AttachDemux()
 	return false;
 }
 
-/* to the audio, else the PCR; without slow playing until they are in
- * sync, and without showing a still first frame meanwhile: the picture
- * stays black until it runs */
+/* to the audio, else the PCR. Only with slow playing does the AVPLAY
+ * bring them together and keep them so, which StartVideo hides behind a
+ * frozen window until they are */
 void cHisiLive::SetSync(unsigned ref)
 {
 	filled<hi_sync_attr> attr;
@@ -340,8 +351,8 @@ void cHisiLive::SetSync(unsigned ref)
 	if (p->HI_UNF_AVPLAY_GetAttr(p->avplay, HI_UNF_AVPLAY_ATTR_ID_SYNC, &sync) != HI_SUCCESS)
 		return;
 	sync.sync_ref = ref;
-	sync.start_region.smooth_play = 0;
-	sync.novel_region.smooth_play = 0;
+	sync.start_region.smooth_play = 1;
+	sync.novel_region.smooth_play = 1;
 	sync.quick_output = 0;
 	if (p->HI_UNF_AVPLAY_SetAttr(p->avplay, HI_UNF_AVPLAY_ATTR_ID_SYNC, &sync) != HI_SUCCESS)
 		hal_info("hisi live: sync %u not set\n", ref);
@@ -401,15 +412,63 @@ bool cHisiLive::StartVideo()
 		p->HI_UNF_VO_SetWindowZorder(p->window, HI_LAYER_ZORDER_MOVETOP);
 		p->shown = true;
 	}
+	/* black, or the picture held by the zapping mode or a pause, and
+	 * silent until the slow start is over */
+	p->HI_UNF_VO_FreezeWindow(p->window, 1, p->hold_last ? HI_UNF_WINDOW_FREEZE_MODE_LAST : HI_UNF_WINDOW_FREEZE_MODE_BLACK);
+	p->HI_UNF_SND_SetTrackMute(p->track, 1);
+	first_frame = false;
 	video_start = now_ms();
 	hi_s32 r = p->HI_UNF_AVPLAY_Start(p->avplay, HI_UNF_AVPLAY_MEDIA_CHAN_VID, NULL);
 	if (r != HI_SUCCESS)
 	{
+		p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->HI_UNF_SND_SetTrackMute(p->track, 0);
 		hal_info("hisi live: video %#x (type %u) not started: %#x\n", vpid, type, r);
 		return false;
 	}
 	p->video_running = true;
+	std::thread(&cHisiLive::Reveal, this, ++p->start_count).detach();
 	return true;
+}
+
+/* window and sound come once the picture runs with the audio, or with its
+ * first frame without audio; at the latest after four seconds */
+void cHisiLive::Reveal(unsigned start)
+{
+	long long t0 = now_ms();
+	int last = INT32_MAX, steady = 0;
+	for (;;)
+	{
+		usleep(40000);
+		std::lock_guard<std::mutex> lock(p->mutex);
+		if (start != p->start_count || !p->video_running)
+			return;
+		bool in_sync = false;
+		if (first_frame)
+		{
+			/* slow playing closes the gap by some 20 ms each round; it is
+			 * over when the gap stops shrinking */
+			filled<hi_avplay_status_info> st;
+			if (!p->audio_running)
+				in_sync = true;
+			else if (p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &st.v) == HI_SUCCESS)
+			{
+				int diff = st.v.diff_av_play_time;
+				steady = abs(diff) <= 100 && abs(diff - last) < 8 ? steady + 1 : 0;
+				last = diff;
+				in_sync = steady >= 3;
+			}
+		}
+		long long t = now_ms() - t0;
+		if (in_sync || t > 4000)
+		{
+			p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+			p->HI_UNF_SND_SetTrackMute(p->track, 0);
+			if (debug_frames)
+				hal_info("hisi live: shown after %lld ms%s\n", t, in_sync ? "" : ", not in sync");
+			return;
+		}
+	}
 }
 
 void cHisiLive::StopVideo(bool blank)
@@ -421,6 +480,9 @@ void cHisiLive::StopVideo(bool blank)
 		p->HI_UNF_AVPLAY_Stop(p->avplay, HI_UNF_AVPLAY_MEDIA_CHAN_VID, &stop);
 		p->video_running = false;
 	}
+	p->hold_last = !blank;
+	/* radio, which may follow, has no picture to wait for */
+	p->HI_UNF_SND_SetTrackMute(p->track, 0);
 	/* the stop mode alone leaves the last frame in a window that stays on */
 	if (blank && p->shown)
 		p->HI_UNF_VO_ResetWindow(p->window, HI_UNF_WINDOW_FREEZE_MODE_BLACK);
@@ -523,6 +585,7 @@ void cHisiLive::Hide()
 	std::lock_guard<std::mutex> lock(p->mutex);
 	if (p->shown)
 	{
+		p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
 		p->HI_UNF_VO_SetWindowEnable(p->window, 0);
 		p->shown = false;
 	}
@@ -549,6 +612,10 @@ bool cHisiLive::PictureInfo(int &width, int &height, int &rate_mhz)
 	width = info.width;
 	height = info.height;
 	rate_mhz = info.fps_integer * 1000 + info.fps_decimal;
+	filled<hi_avplay_status_info> st;
+	if (debug_frames && p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &st.v) == HI_SUCCESS)
+		hal_info("hisi live: audio - video %d ms (pts audio %u video %u, play %u local %u)\n", st.v.diff_av_play_time,
+			 st.v.last_aud_pts, st.v.last_vid_pts, st.v.play_time, st.v.local_time);
 	hal_debug("hisi live: %ux%u at %u.%03u fps\n", info.width, info.height, info.fps_integer, info.fps_decimal);
 	return true;
 }
