@@ -116,6 +116,9 @@ struct cHisiLive::priv
 	 * until audio and video are in sync; each start counts up */
 	bool hold_last = false;
 	unsigned start_count = 0;
+	/* what is set already: Neutrino sets them again on every zap */
+	int screen_aspect = -1, aspect_mode = -1;
+	hi_rect window_rect = { 0, 0, 0, 0 };
 	/* AC3, E-AC3 and DTS through libHA.AUDIO.MULTI and the vendor's FFmpeg
 	 * 3, as the vendor service decodes them */
 	hi_s32 (*multi_config)(void *, hi_s32 *) = nullptr;
@@ -633,6 +636,9 @@ void cHisiLive::SetScreenAspect(int aspect)
 		default: return;
 	}
 	std::lock_guard<std::mutex> lock(p->mutex);
+	if (aspect == p->screen_aspect)
+		return;
+	p->screen_aspect = aspect;
 	if (p->HI_UNF_DISP_SetAspectRatio(HI_UNF_DISPLAY1, &r) != HI_SUCCESS)
 		hal_info("hisi live: screen aspect %d not set\n", aspect);
 }
@@ -645,6 +651,9 @@ void cHisiLive::SetAspectMode(int mode)
 	if (mode < 0 || mode > 3)
 		return;
 	std::lock_guard<std::mutex> lock(p->mutex);
+	if (mode == p->aspect_mode)
+		return;
+	p->aspect_mode = mode;
 	filled<hi_window_attr> attr;
 	if (p->HI_UNF_VO_GetWindowAttr(p->window, &attr.v) != HI_SUCCESS)
 		return;
@@ -668,6 +677,9 @@ void cHisiLive::SetWindowRect(int x, int y, int w, int h)
 		r = { 0, 0, 0, 0 };
 	else
 		r = { (hi_s32)(x * vw / 720), (hi_s32)(y * vh / 576), (hi_s32)(w * vw / 720), (hi_s32)(h * vh / 576) };
+	if (!memcmp(&r, &p->window_rect, sizeof(r)))
+		return;
+	p->window_rect = r;
 	if (p->HI_UNF_VO_SetWindowAttr(p->window, &attr.v) != HI_SUCCESS)
 		hal_info("hisi live: window %d,%d %dx%d not set\n", r.x, r.y, r.width, r.height);
 }
