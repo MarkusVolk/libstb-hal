@@ -114,7 +114,7 @@ struct cHisiLive::priv
 	bool video_running = false, audio_running = false, shown = false;
 	/* a start shows the window frozen, black or with the last picture,
 	 * until audio and video are in sync; each start counts up */
-	bool hold_last = false;
+	bool hold_last = false, frozen = false;
 	unsigned start_count = 0;
 	/* the size and rate of the last picture, still shown when it is held */
 	int picture_width = 0, picture_height = 0, picture_rate = 0;
@@ -417,9 +417,11 @@ bool cHisiLive::StartVideo()
 		p->HI_UNF_VO_SetWindowZorder(p->window, HI_LAYER_ZORDER_MOVETOP);
 		p->shown = true;
 	}
-	/* black, or the picture held by the zapping mode or a pause, and
-	 * silent until the slow start is over */
-	p->HI_UNF_VO_FreezeWindow(p->window, 1, p->hold_last ? HI_UNF_WINDOW_FREEZE_MODE_LAST : HI_UNF_WINDOW_FREEZE_MODE_BLACK);
+	/* black, or the picture held by the zapping mode or a pause, which
+	 * the stop froze already, and silent until the slow start is over */
+	if (!p->frozen)
+		p->HI_UNF_VO_FreezeWindow(p->window, 1, HI_UNF_WINDOW_FREEZE_MODE_BLACK);
+	p->frozen = true;
 	p->HI_UNF_SND_SetTrackMute(p->track, 1);
 	first_frame = false;
 	video_start = now_ms();
@@ -427,6 +429,7 @@ bool cHisiLive::StartVideo()
 	if (r != HI_SUCCESS)
 	{
 		p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->frozen = false;
 		p->HI_UNF_SND_SetTrackMute(p->track, 0);
 		hal_info("hisi live: video %#x (type %u) not started: %#x\n", vpid, type, r);
 		return false;
@@ -468,6 +471,7 @@ void cHisiLive::Reveal(unsigned start)
 		if (in_sync || t > 4000)
 		{
 			p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+			p->frozen = false;
 			p->HI_UNF_SND_SetTrackMute(p->track, 0);
 			if (debug_frames)
 				hal_info("hisi live: shown after %lld ms%s\n", t, in_sync ? "" : ", not in sync");
@@ -479,6 +483,13 @@ void cHisiLive::Reveal(unsigned start)
 void cHisiLive::StopVideo(bool blank)
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
+	/* the picture to hold is frozen while it still runs: the stop and the
+	 * next start would lose it */
+	if (!blank && p->video_running && p->shown && !p->frozen)
+	{
+		p->HI_UNF_VO_FreezeWindow(p->window, 1, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->frozen = true;
+	}
 	if (p->video_running)
 	{
 		hi_avplay_stop_opt stop = { (hi_u32)(blank ? HI_UNF_AVPLAY_STOP_MODE_BLACK : HI_UNF_AVPLAY_STOP_MODE_STILL), 0 };
@@ -490,7 +501,12 @@ void cHisiLive::StopVideo(bool blank)
 	p->HI_UNF_SND_SetTrackMute(p->track, 0);
 	/* the stop mode alone leaves the last frame in a window that stays on */
 	if (blank && p->shown)
+	{
+		if (p->frozen)
+			p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->frozen = false;
 		p->HI_UNF_VO_ResetWindow(p->window, HI_UNF_WINDOW_FREEZE_MODE_BLACK);
+	}
 }
 
 /* the codec of the MULTI decoder for an audio type, 0 for the HA decoders */
@@ -591,6 +607,7 @@ void cHisiLive::Hide()
 	if (p->shown)
 	{
 		p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->frozen = false;
 		p->HI_UNF_VO_SetWindowEnable(p->window, 0);
 		p->shown = false;
 	}
