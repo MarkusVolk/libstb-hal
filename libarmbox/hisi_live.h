@@ -34,7 +34,8 @@ class cHisiLive
 		void SetAudioType(int zapit_type);
 		bool StartVideo();
 		void StopVideo(bool blank);
-		/* MPEG audio and AAC; AC3 and the like stay on the emulated decoder */
+		/* MPEG audio and AAC, AC3, E-AC3 and DTS where the vendor's FFmpeg
+		 * loads; anything else stays on the emulated decoder */
 		bool DecodesAudio();
 		bool StartAudio();
 		void StopAudio();

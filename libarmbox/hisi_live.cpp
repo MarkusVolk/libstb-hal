@@ -32,7 +32,8 @@
 #define HISI_DEMUX_FILE "/tmp/hisi-live-demux"
 
 /* zapit's audio types */
-enum { AUDIO_AC3 = 0, AUDIO_MPEG = 1, AUDIO_DTS = 2, AUDIO_LPCM = 6, AUDIO_AAC = 8, AUDIO_AACPLUS = 9 };
+enum { AUDIO_AC3 = 0, AUDIO_MPEG = 1, AUDIO_DTS = 2, AUDIO_LPCM = 6, AUDIO_AAC = 8, AUDIO_AACPLUS = 9,
+	AUDIO_DTSHD = 0x10, AUDIO_EAC3 = 0x22 };
 /* libstb-hal's VIDEO_FORMAT */
 enum { FORMAT_MPEG2 = 0, FORMAT_H264 = 1, FORMAT_VC1 = 2, FORMAT_H265 = 6, FORMAT_AVS = 16 };
 
@@ -101,7 +102,23 @@ struct cHisiLive::priv
 	int video_format = FORMAT_MPEG2;
 	int audio_type = AUDIO_MPEG;
 	bool video_running = false, audio_running = false, shown = false;
+	/* AC3, E-AC3 and DTS through libHA.AUDIO.MULTI and the vendor's FFmpeg
+	 * 3, as the vendor service decodes them */
+	hi_s32 (*multi_config)(void *, hi_s32 *) = nullptr;
 };
+
+/* a library of the vendor: it finds its own ones through its run path
+ * (hisi-libs); lazily, as libavformat.so.57 refers to functions of the
+ * vendor service that the audio decoding never calls */
+static void *load_vendor(const char *name)
+{
+	char path[128];
+	snprintf(path, sizeof(path), HISI_LIB_DIR "%s", name);
+	void *h = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+	if (!h)
+		hal_info("hisi live: %s\n", dlerror());
+	return h;
+}
 
 static long long now_ms()
 {
@@ -245,6 +262,25 @@ bool cHisiLive::Init()
 		if (p->HI_UNF_AVPLAY_RegisterAcodecLib(lib) != HI_SUCCESS)
 			hal_info("hisi live: no %s decoder\n", c);
 	}
+	/* the MULTI decoder keeps a codec per decoder slot and finds the slot
+	 * of a decoding thread in a table it is given; an empty one puts every
+	 * thread into slot 0. Its configuration takes no decoder handle. */
+	static hi_s32 slots[20];
+	if (void *multi = load_vendor("libHA.AUDIO.MULTI.decode.so"))
+	{
+		void (*set_codecuserinfo)(void *);
+		*(void **)&set_codecuserinfo = dlsym(multi, "set_codecuserinfo");
+		void **entry = (void **)dlsym(multi, "ha_audio_decode_entry");
+		if (set_codecuserinfo && entry
+		    && p->HI_UNF_AVPLAY_RegisterAcodecLib(HISI_LIB_DIR "libHA.AUDIO.MULTI.decode.so") == HI_SUCCESS)
+		{
+			set_codecuserinfo(slots);
+			/* HI_HA_DECODE_S: name, id, version, description, 2 reserved, init, deinit, config */
+			*(void **)&p->multi_config = entry[8];
+		}
+	}
+	if (!p->multi_config)
+		hal_info("hisi live: AC3, E-AC3 and DTS stay on the emulated decoder\n");
 	filled<hi_avplay_attr> attr;
 	CHECK(p->HI_UNF_AVPLAY_GetDefaultConfig(&attr.v, HI_UNF_AVPLAY_STREAM_TYPE_TS));
 	attr.v.demux_id = p->dmx;
@@ -381,10 +417,24 @@ void cHisiLive::StopVideo(bool blank)
 		p->HI_UNF_VO_ResetWindow(p->window, HI_UNF_WINDOW_FREEZE_MODE_BLACK);
 }
 
+/* the codec of the MULTI decoder for an audio type, 0 for the HA decoders */
+static hi_s32 multi_codec(int zapit_type)
+{
+	switch (zapit_type)
+	{
+		case AUDIO_AC3: return 3;
+		case AUDIO_DTS:
+		case AUDIO_DTSHD: return 4;
+		case AUDIO_EAC3: return 43;
+		default: return 0;
+	}
+}
+
 bool cHisiLive::DecodesAudio()
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
-	return p->audio_type == AUDIO_MPEG || p->audio_type == AUDIO_AAC || p->audio_type == AUDIO_AACPLUS;
+	int t = p->audio_type;
+	return t == AUDIO_MPEG || t == AUDIO_AAC || t == AUDIO_AACPLUS || (p->multi_config && multi_codec(t));
 }
 
 bool cHisiLive::StartAudio()
@@ -393,13 +443,23 @@ bool cHisiLive::StartAudio()
 	if (p->audio_running || !p->pid[PID_AUDIO] || !AttachDemux())
 		return false;
 	hi_u32 type;
+	hi_s32 multi = p->multi_config ? multi_codec(p->audio_type) : 0;
 	switch (p->audio_type)
 	{
 		case AUDIO_MPEG: type = HA_AUDIO_ID_MP2; break;
 		case AUDIO_AAC:
 		case AUDIO_AACPLUS: type = HA_AUDIO_ID_AAC; break;
 		default:
-			return false;
+			if (!multi)
+				return false;
+			hi_s32 config[2] = { (hi_s32)0xffff1000, multi };
+			if (p->multi_config(NULL, config) != HI_SUCCESS)
+			{
+				hal_info("hisi live: MULTI decoder codec %d not set\n", multi);
+				return false;
+			}
+			type = HA_AUDIO_ID_CUSTOM_1;
+			break;
 	}
 	filled<hi_acodec_attr> attr;
 	hi_acodec_attr &adec = attr.v;
@@ -410,7 +470,8 @@ bool cHisiLive::StartAudio()
 	o.dec_mode = HD_DEC_MODE_RAWPCM;
 	o.codec_private_data = NULL;
 	o.codec_private_data_size = 0;
-	/* the SDK defaults: MPEG audio interleaved stereo, AAC up to 8 planar channels */
+	/* the SDK defaults: MPEG audio interleaved stereo, AAC up to 8 planar
+	 * channels; MULTI downmixes to interleaved stereo as well */
 	o.pcm_format.desired_out_channels = type == HA_AUDIO_ID_AAC ? 8 : 2;
 	o.pcm_format.interleaved = type != HA_AUDIO_ID_AAC;
 	o.pcm_format.bit_per_sample = 16;

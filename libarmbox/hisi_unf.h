@@ -51,6 +51,8 @@ typedef int32_t hi_bool;
 #define HA_AUDIO_ID_MP2 0x20000002
 #define HA_AUDIO_ID_MP3 0x21f00003
 #define HA_AUDIO_ID_AAC 0x80020001
+/* libHA.AUDIO.MULTI.decode.so, the vendor's FFmpeg decoder of AC3, E-AC3 and DTS */
+#define HA_AUDIO_ID_CUSTOM_1 0x81f00401
 #define HD_DEC_MODE_RAWPCM 0
 #define HA_AUDIO_MAXCHANNELS 8
 
