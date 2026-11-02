@@ -116,6 +116,8 @@ struct cHisiLive::priv
 	 * until audio and video are in sync; each start counts up */
 	bool hold_last = false;
 	unsigned start_count = 0;
+	/* the size and rate of the last picture, still shown when it is held */
+	int picture_width = 0, picture_height = 0, picture_rate = 0;
 	/* what is set already: Neutrino sets them again on every zap */
 	int screen_aspect = -1, aspect_mode = -1;
 	hi_rect window_rect = { 0, 0, 0, 0 };
@@ -608,13 +610,24 @@ int64_t cHisiLive::GetPts()
 bool cHisiLive::PictureInfo(int &width, int &height, int &rate_mhz)
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
+	if (!p->video_running)
+	{
+		/* a live pause, which Neutrino would take for a channel without
+		 * a picture and end the timeshift */
+		if (!p->shown || !p->hold_last || !p->picture_width)
+			return false;
+		width = p->picture_width;
+		height = p->picture_height;
+		rate_mhz = p->picture_rate;
+		return true;
+	}
 	filled<hi_avplay_stream_info> stream;
 	hi_avplay_stream_info &info = stream.v;
-	if (!p->video_running || p->HI_UNF_AVPLAY_GetStreamInfo(p->avplay, &info) != HI_SUCCESS)
+	if (p->HI_UNF_AVPLAY_GetStreamInfo(p->avplay, &info) != HI_SUCCESS)
 		return false;
-	width = info.width;
-	height = info.height;
-	rate_mhz = info.fps_integer * 1000 + info.fps_decimal;
+	width = p->picture_width = info.width;
+	height = p->picture_height = info.height;
+	rate_mhz = p->picture_rate = info.fps_integer * 1000 + info.fps_decimal;
 	filled<hi_avplay_status_info> st;
 	if (debug_frames && p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &st.v) == HI_SUCCESS)
 		hal_info("hisi live: audio - video %d ms (pts audio %u video %u, play %u local %u)\n", st.v.diff_av_play_time,
