@@ -157,12 +157,15 @@ struct cHisiLive::priv
 
 /* a library of the vendor: it finds its own ones through its run path
  * (hisi-libs); lazily, as libavformat.so.57 refers to functions of the
- * vendor service that the audio decoding never calls */
+ * vendor service that the audio decoding never calls. Bound to its own
+ * symbols first: the AAC decoder carries an FDK of its own, the MULTI
+ * decoder FFmpeg 3, which libfdk-aac and FFmpeg of Neutrino would take
+ * the place of. The SDK's own load of it later finds it loaded. */
 static void *load_vendor(const char *name)
 {
 	char path[128];
 	snprintf(path, sizeof(path), HISI_LIB_DIR "%s", name);
-	void *h = dlopen(path, RTLD_LAZY | RTLD_LOCAL);
+	void *h = dlopen(path, RTLD_LAZY | RTLD_LOCAL | RTLD_DEEPBIND);
 	if (!h)
 		hal_info("hisi live: %s\n", dlerror());
 	return h;
@@ -317,6 +320,8 @@ bool cHisiLive::Init()
 	for (const char *c : codecs)
 	{
 		char lib[80];
+		snprintf(lib, sizeof(lib), "libHA.AUDIO.%s.decode.so", c);
+		load_vendor(lib);
 		snprintf(lib, sizeof(lib), HISI_LIB_DIR "libHA.AUDIO.%s.decode.so", c);
 		if (p->HI_UNF_AVPLAY_RegisterAcodecLib(lib) != HI_SUCCESS)
 			hal_info("hisi live: no %s decoder\n", c);
