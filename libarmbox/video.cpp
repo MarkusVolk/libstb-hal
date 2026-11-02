@@ -840,7 +840,7 @@ int cVideo::Stop(bool blank)
 		/* zapit always stops blanking; the zapping mode, which is the
 		 * emulated device's, decides: hold and hold till lock keep the
 		 * picture, as does a picture held on purpose */
-		bool hold = !held_zapmode.empty() || zapping_mode == 1 || zapping_mode == 3;
+		bool hold = !held_zapmode.empty() || zapping_mode == 1;
 		h->StopVideo(blank && !hold);
 		return 0;
 	}
@@ -1348,10 +1348,14 @@ void cVideo::SetControl(int control, int value)
 			p = "/proc/stb/vmpeg/0/pep_scaler_sharpness";
 			break;
 		case VIDEO_CONTROL_ZAPPING_MODE:
-			zapping_mode = value;
-			const char *mode_zapping[] = { "mute", "hold", "mutetilllock", "holdtilllock"};
-			proc_put("/proc/stb/video/zapmode", mode_zapping[zapping_mode], strlen(mode_zapping[zapping_mode]));
+		{
+			/* 0 black, 1 held, both until the tuner locks; 2 and 3 were
+			 * the lock variants of a Neutrino that offered all four */
+			zapping_mode = value & 1;
+			const char *mode = zapping_mode ? "holdtilllock" : "mutetilllock";
+			proc_put("/proc/stb/video/zapmode", mode, strlen(mode));
 			break;
+		}
 	}
 	if (p)
 	{

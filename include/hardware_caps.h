@@ -69,7 +69,7 @@ typedef struct hw_caps
 	int can_live_pause; /* live TV can be held in a buffer */
 	int video_needs_blank_frame; /* stopFrame() leaves a picture, a black frame is drawn */
 	int pip_warmup; /* PiP has to be opened once at start before it works */
-	int standby_zappingmode_mute; /* standby needs zapping mode 2 for a blank screen */
+	int standby_zappingmode_mute; /* standby needs zapping mode 0 for a blank screen */
 	int fb_wait_vsync; /* FBIO_WAITFORVSYNC before framebuffer operations */
 	/* CI and recording */
 	int can_ci_clock;
