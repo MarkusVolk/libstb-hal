@@ -8,6 +8,7 @@
  */
 #include <config.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -447,7 +448,8 @@ bool cHisiLive::StartVideo()
 void cHisiLive::Reveal(unsigned start)
 {
 	long long t0 = now_ms();
-	int last = INT32_MAX, steady = 0;
+	/* the last gaps, a round of 40 ms each */
+	int gaps[5], seen = 0;
 	for (;;)
 	{
 		usleep(40000);
@@ -458,16 +460,24 @@ void cHisiLive::Reveal(unsigned start)
 		if (first_frame)
 		{
 			/* slow playing closes the gap by some 20 ms each round; it is
-			 * over when the gap stops shrinking */
+			 * over when the gap stops shrinking. The gap moves by up to a
+			 * frame of the sound, 32 ms of AC3. */
 			filled<hi_avplay_status_info> st;
 			if (!p->audio_running)
 				in_sync = true;
 			else if (p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &st.v) == HI_SUCCESS)
 			{
-				int diff = st.v.diff_av_play_time;
-				steady = abs(diff) <= 100 && abs(diff - last) < 8 ? steady + 1 : 0;
-				last = diff;
-				in_sync = steady >= 3;
+				gaps[seen++ % 5] = st.v.diff_av_play_time;
+				if (seen >= 5)
+				{
+					int lo = INT32_MAX, hi = INT32_MIN;
+					for (int g : gaps)
+					{
+						lo = std::min(lo, g);
+						hi = std::max(hi, g);
+					}
+					in_sync = lo >= -100 && hi <= 100 && hi - lo <= 40;
+				}
 			}
 		}
 		long long t = now_ms() - t0;
