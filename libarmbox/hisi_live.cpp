@@ -124,6 +124,8 @@ struct cHisiLive::priv
 	hi_u32 dmx = 0, ram_ports = 0;
 	/* the players feed a RAM port of the demux instead of the tuner's */
 	bool playback = false;
+	/* fast forward or rewind: single pictures, each shown at once */
+	bool trick = false;
 	hi_u32 ram_port = 0;
 	hi_handle ts_buffer = 0;
 	/* what live TV and a player play */
@@ -765,6 +767,7 @@ void cHisiLive::StopPlayback()
 			return;
 		p->HI_UNF_DMX_ResetTSBuffer(p->ts_buffer);
 		p->playback = false;
+		p->trick = false;
 		video = p->live_video;
 		audio = p->live_audio;
 		p->live_video = p->live_audio = false;
@@ -799,7 +802,7 @@ void cHisiLive::ClearPlayback()
 		return;
 	/* the last picture, silent, until the stream is in sync again, as at
 	 * a start */
-	if (p->video_running)
+	if (p->video_running && !p->trick)
 	{
 		/* a flush clears twice; the time from before the first counts */
 		filled<hi_avplay_status_info> st;
@@ -811,7 +814,7 @@ void cHisiLive::ClearPlayback()
 	}
 	p->HI_UNF_DMX_ResetTSBuffer(p->ts_buffer);
 	p->HI_UNF_AVPLAY_Reset(p->avplay, NULL);
-	if (p->video_running)
+	if (p->video_running && !p->trick)
 	{
 		first_frame = true;
 		if (debug_frames)
@@ -837,8 +840,25 @@ void cHisiLive::TrickPlayback(bool on)
 	std::lock_guard<std::mutex> lock(p->mutex);
 	if (!p->playback)
 		return;
+	p->trick = on;
 	SetSync(on || !p->audio_running ? HI_UNF_SYNC_REF_NONE : HI_UNF_SYNC_REF_AUDIO);
 	p->HI_UNF_SND_SetTrackMute(p->track, on);
+	if (on && p->frozen)
+	{
+		/* a picture frozen for the sync would stay so */
+		++p->start_count;
+		p->HI_UNF_VO_FreezeWindow(p->window, 0, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->frozen = false;
+	}
+	else if (!on && p->video_running && p->audio_running)
+	{
+		/* back to the sound: hidden until in sync, as after a seek */
+		p->HI_UNF_VO_FreezeWindow(p->window, 1, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->frozen = true;
+		p->HI_UNF_SND_SetTrackMute(p->track, 1);
+		first_frame = true;
+		std::thread(&cHisiLive::Reveal, this, ++p->start_count).detach();
+	}
 }
 
 int64_t cHisiLive::GetPts()
