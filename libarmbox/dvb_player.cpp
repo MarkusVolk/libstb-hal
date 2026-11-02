@@ -415,7 +415,16 @@ void cDvbPlayer::setupDecoders()
 	audioDecoder->Stop();
 	AVStream *vst = mFmt->streams[mVideoIdx];
 	int rate = fallbackRate(vst->avg_frame_rate.num > 0 ? vst->avg_frame_rate : vst->r_frame_rate);
-	mSink->open(mVideoType, mAudioType, mAudioIdx >= 0, rate);
+	/* HiSilicon's AVPLAY of live TV, else the decoder devices */
+	cDvbSink *hisi = newHisiSink();
+	if (hisi && hisi->open(mVideoType, mAudioType, mAudioIdx >= 0, rate))
+		mSink.reset(hisi);
+	else
+	{
+		delete hisi;
+		mSink.reset(newDeviceSink());
+		mSink->open(mVideoType, mAudioType, mAudioIdx >= 0, rate);
+	}
 }
 
 void cDvbPlayer::releaseDecoders()
@@ -829,11 +838,12 @@ cHwPlayer::Result cDvbPlayer::start(const std::string &url, const std::string &a
 	clock_gettime(CLOCK_MONOTONIC, &t1);
 	long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
 	hal_info("%s: %s after %ld ms\n", __func__, shown ? "first picture" : "no picture yet", ms);
-	/* the held live picture of the HiSilicon boxes is the AVPLAY's, above
-	 * the emulated device, which shows its last frame of long ago until
-	 * the stream's first */
+	/* played by the emulated devices instead of the AVPLAY of live TV,
+	 * whose window above them shows the held picture until the stream's
+	 * first */
 	if (cHisiLive *h = cHisiLive::getInstance())
-		h->Hide();
+		if (!h->Playing())
+			h->Hide();
 	videoDecoder->HoldPicture(false);
 	if (mAbort)
 	{

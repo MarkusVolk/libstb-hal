@@ -4,10 +4,10 @@
  * The driver of these boxes emulates the DVB decoder devices with a hidden
  * vendor service whose AVPLAY plays slowly after every zap until audio and
  * video are in sync. This plays the live programme with an AVPLAY of our
- * own on a free HiSilicon demux of the tuner's port, synchronised to the
- * audio without slow playing. Everything else - tuner, sections,
- * recording, the players of files and the timeshift - stays on the
- * emulated devices.
+ * own on a free HiSilicon demux of the tuner's port, and what cDvbPlayer
+ * plays - recordings, the timeshift, files and streams - through a RAM
+ * port of that demux. The slow start stays hidden behind a frozen window.
+ * Tuner, sections and recording stay on the emulated devices.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
 #ifndef __HISI_LIVE_H__
 #define __HISI_LIVE_H__
 
+#include <stddef.h>
 #include <stdint.h>
 #include <functional>
 
@@ -63,6 +64,17 @@ class cHisiLive
 			bool nv12;
 		};
 		bool Capture(const std::function<bool(const Frame &)> &use);
+		/* the players' transport stream through a RAM port of the demux:
+		 * PIDs 0x100 video, 0x101 sound, no PCR; the decoders as for live
+		 * TV, and a held live picture stays until the stream's */
+		bool StartPlayback(int video_format, int audio_type, bool sound);
+		void StopPlayback();
+		bool Playing();
+		/* whole TS packets, false while the buffer has no room */
+		bool Feed(const uint8_t *ts, size_t len);
+		void ClearPlayback();
+		void PausePlayback(bool on);
+		void TrickPlayback(bool on);
 		/* gives AVPLAY, window, track and demux back */
 		void Close();
 
@@ -72,6 +84,13 @@ class cHisiLive
 		bool AttachDemux();
 		void SetSync(unsigned ref);
 		void Reveal(unsigned start);
+		/* the AVPLAY's channels for the source playing: Start and Stop
+		 * leave a player's alone and take live TV up after it */
+		bool startVideo();
+		void stopVideo(bool blank);
+		bool startAudio();
+		void stopAudio();
+		bool OpenTsBuffer();
 		struct priv;
 		priv *p = nullptr;
 };

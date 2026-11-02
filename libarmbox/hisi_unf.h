@@ -72,6 +72,7 @@ typedef int32_t hi_bool;
 #define HI_UNF_WINDOW_FREEZE_MODE_LAST 0
 #define HI_UNF_WINDOW_FREEZE_MODE_BLACK 1
 #define HI_UNF_DMX_PORT_TSI_0 0x20
+#define HI_UNF_DMX_PORT_RAM_0 0x80
 #define HI_UNF_SND_0 0
 #define HI_UNF_SND_TRACK_TYPE_MASTER 0
 #define HI_UNF_SND_TRACK_TYPE_SLAVE 1
@@ -236,6 +237,12 @@ typedef struct
 	hi_u32 rest[7];
 } hi_dmx_capability;
 
+typedef struct
+{
+	uint8_t *data;
+	hi_u32 size;
+} hi_stream_buf;
+
 /* opaque, filled by the library's defaults */
 typedef struct { hi_u32 data[6]; } hi_audiotrack_attr;
 typedef struct { hi_u32 data[148]; } hi_snd_attr;
@@ -262,6 +269,8 @@ HISI_LAYOUT(hi_avplay_status_info, 272);
 HISI_LAYOUT(hi_avplay_stream_info, 100);
 static_assert(offsetof(hi_avplay_stream_info, width) == 48 && offsetof(hi_avplay_stream_info, fps_integer) == 40, "stream info");
 HISI_LAYOUT(hi_dmx_capability, 48);
+static_assert(offsetof(hi_dmx_capability, ram_port_num) == 12, "dmx capability");
+HISI_LAYOUT(hi_stream_buf, 8);
 HISI_LAYOUT(hi_audiotrack_attr, 24);
 HISI_LAYOUT(hi_snd_attr, 592);
 #undef HISI_LAYOUT

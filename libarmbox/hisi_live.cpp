@@ -36,6 +36,11 @@
 /* zapit's audio types */
 enum { AUDIO_AC3 = 0, AUDIO_MPEG = 1, AUDIO_DTS = 2, AUDIO_LPCM = 6, AUDIO_AAC = 8, AUDIO_AACPLUS = 9,
 	AUDIO_DTSHD = 0x10, AUDIO_EAC3 = 0x22 };
+/* none of zapit's: MPEG layer 3 of files and streams */
+enum { AUDIO_MP3 = 0x100 };
+/* the PIDs the players' transport stream carries, and its buffer */
+enum { PLAY_VIDEO_PID = 0x100, PLAY_AUDIO_PID = 0x101 };
+#define PLAY_BUFFER_SIZE (8 << 20)
 /* libstb-hal's VIDEO_FORMAT */
 enum { FORMAT_MPEG2 = 0, FORMAT_H264 = 1, FORMAT_VC1 = 2, FORMAT_H265 = 6, FORMAT_AVS = 16 };
 
@@ -57,6 +62,11 @@ template <typename T> struct filled
 	F(HI_UNF_DMX_GetTSPortId, (hi_u32, hi_u32 *)) \
 	F(HI_UNF_DMX_AttachTSPort, (hi_u32, hi_u32)) \
 	F(HI_UNF_DMX_DetachTSPort, (hi_u32)) \
+	F(HI_UNF_DMX_CreateTSBuffer, (hi_u32, hi_u32, hi_handle *)) \
+	F(HI_UNF_DMX_DestroyTSBuffer, (hi_handle)) \
+	F(HI_UNF_DMX_GetTSBuffer, (hi_handle, hi_u32, hi_stream_buf *, hi_u32)) \
+	F(HI_UNF_DMX_PutTSBuffer, (hi_handle, hi_u32)) \
+	F(HI_UNF_DMX_ResetTSBuffer, (hi_handle)) \
 	F(HI_UNF_DISP_Init, (void)) \
 	F(HI_UNF_VO_Init, (hi_u32)) \
 	F(HI_UNF_VO_CreateWindow, (const hi_window_attr *, hi_handle *)) \
@@ -94,6 +104,9 @@ template <typename T> struct filled
 	F(HI_UNF_AVPLAY_SetAttr, (hi_handle, hi_u32, void *)) \
 	F(HI_UNF_AVPLAY_Start, (hi_handle, hi_u32, const void *)) \
 	F(HI_UNF_AVPLAY_Stop, (hi_handle, hi_u32, const hi_avplay_stop_opt *)) \
+	F(HI_UNF_AVPLAY_Reset, (hi_handle, const void *)) \
+	F(HI_UNF_AVPLAY_Pause, (hi_handle, const void *)) \
+	F(HI_UNF_AVPLAY_Resume, (hi_handle, const void *)) \
 	F(HI_UNF_AVPLAY_GetStatusInfo, (hi_handle, hi_avplay_status_info *)) \
 	F(HI_UNF_AVPLAY_GetStreamInfo, (hi_handle, hi_avplay_stream_info *)) \
 	F(HI_UNF_AVPLAY_RegisterEvent, (hi_handle, hi_u32, event_cb))
@@ -108,15 +121,29 @@ struct cHisiLive::priv
 #undef F
 	std::mutex mutex;
 	hi_handle avplay = 0, window = 0, track = 0;
-	hi_u32 dmx = 0;
-	unsigned short pid[PID_COUNT] = { 0, 0, 0 };
-	int video_format = FORMAT_MPEG2;
-	int audio_type = AUDIO_MPEG;
+	hi_u32 dmx = 0, ram_ports = 0;
+	/* the players feed a RAM port of the demux instead of the tuner's */
+	bool playback = false;
+	hi_u32 ram_port = 0;
+	hi_handle ts_buffer = 0;
+	/* what live TV and a player play */
+	struct source
+	{
+		unsigned short pid[PID_COUNT] = { 0, 0, 0 };
+		int video_format = FORMAT_MPEG2;
+		int audio_type = AUDIO_MPEG;
+	} live, play;
+	source &cur() { return playback ? play : live; }
+	/* live TV started while a player plays, which comes after it */
+	bool live_video = false, live_audio = false;
 	bool video_running = false, audio_running = false, shown = false;
 	/* a start shows the window frozen, black or with the last picture,
 	 * until audio and video are in sync; each start counts up */
 	bool hold_last = false, frozen = false;
 	unsigned start_count = 0;
+	/* the play time of the AVPLAY before a player's flush: until it starts
+	 * again from 0, its status is the one from before */
+	hi_u32 flushed_play_time = UINT32_MAX;
 	/* the size and rate of the last picture, still shown when it is held */
 	int picture_width = 0, picture_height = 0, picture_rate = 0;
 	/* what is set already: Neutrino sets them again on every zap */
@@ -239,6 +266,7 @@ bool cHisiLive::Init()
 	filled<hi_dmx_capability> caps;
 	hi_dmx_capability &cap = caps.v;
 	CHECK(p->HI_UNF_DMX_GetCapability(&cap));
+	p->ram_ports = cap.ram_port_num;
 	bool found = false;
 	if (FILE *f = fopen(HISI_DEMUX_FILE, "r"))
 	{
@@ -333,7 +361,7 @@ bool cHisiLive::Init()
  * players of the emulated devices may have taken it meanwhile */
 bool cHisiLive::AttachDemux()
 {
-	hi_u32 port = HI_UNF_DMX_PORT_TSI_0 + cDemux::GetSource(0);
+	hi_u32 port = p->playback ? p->ram_port : HI_UNF_DMX_PORT_TSI_0 + cDemux::GetSource(0);
 	hi_u32 now;
 	if (p->HI_UNF_DMX_GetTSPortId(p->dmx, &now) == HI_SUCCESS)
 	{
@@ -368,28 +396,39 @@ void cHisiLive::SetPid(int which, unsigned short pid)
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
 	if (which >= 0 && which < PID_COUNT)
-		p->pid[which] = pid;
+		p->live.pid[which] = pid;
 }
 
 void cHisiLive::SetVideoType(int video_format)
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
-	p->video_format = video_format;
+	p->live.video_format = video_format;
 }
 
 void cHisiLive::SetAudioType(int zapit_type)
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
-	p->audio_type = zapit_type;
+	p->live.audio_type = zapit_type;
 }
 
 bool cHisiLive::StartVideo()
 {
+	{
+		std::lock_guard<std::mutex> lock(p->mutex);
+		if (p->playback)
+			return p->live_video = true;
+	}
+	return startVideo();
+}
+
+bool cHisiLive::startVideo()
+{
 	std::lock_guard<std::mutex> lock(p->mutex);
-	if (p->video_running || !p->pid[PID_VIDEO] || !AttachDemux())
+	priv::source &src = p->cur();
+	if (p->video_running || !src.pid[PID_VIDEO] || !AttachDemux())
 		return false;
 	hi_u32 type;
-	switch (p->video_format)
+	switch (src.video_format)
 	{
 		case FORMAT_H264: type = HI_UNF_VCODEC_TYPE_H264; break;
 		case FORMAT_H265: type = HI_UNF_VCODEC_TYPE_HEVC; break;
@@ -408,8 +447,8 @@ bool cHisiLive::StartVideo()
 		p->HI_UNF_AVPLAY_SetAttr(p->avplay, HI_UNF_AVPLAY_ATTR_ID_VDEC, &vdec);
 	}
 	if (!p->audio_running)
-		SetSync(p->pid[PID_PCR] && p->pid[PID_PCR] != 0x1fff ? HI_UNF_SYNC_REF_PCR : HI_UNF_SYNC_REF_NONE);
-	hi_u32 vpid = p->pid[PID_VIDEO], pcr = p->pid[PID_PCR] ? p->pid[PID_PCR] : 0x1fff;
+		SetSync(src.pid[PID_PCR] && src.pid[PID_PCR] != 0x1fff ? HI_UNF_SYNC_REF_PCR : HI_UNF_SYNC_REF_NONE);
+	hi_u32 vpid = src.pid[PID_VIDEO], pcr = src.pid[PID_PCR] ? src.pid[PID_PCR] : 0x1fff;
 	p->HI_UNF_AVPLAY_SetAttr(p->avplay, HI_UNF_AVPLAY_ATTR_ID_PCR_PID, &pcr);
 	p->HI_UNF_AVPLAY_SetAttr(p->avplay, HI_UNF_AVPLAY_ATTR_ID_VID_PID, &vpid);
 	if (!p->shown)
@@ -465,8 +504,10 @@ void cHisiLive::Reveal(unsigned start)
 			filled<hi_avplay_status_info> st;
 			if (!p->audio_running)
 				in_sync = true;
-			else if (p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &st.v) == HI_SUCCESS)
+			else if (p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &st.v) == HI_SUCCESS
+				 && st.v.play_time < p->flushed_play_time)
 			{
+				p->flushed_play_time = UINT32_MAX;
 				gaps[seen++ % 5] = st.v.diff_av_play_time;
 				if (seen >= 5)
 				{
@@ -494,6 +535,19 @@ void cHisiLive::Reveal(unsigned start)
 }
 
 void cHisiLive::StopVideo(bool blank)
+{
+	{
+		std::lock_guard<std::mutex> lock(p->mutex);
+		if (p->playback)
+		{
+			p->live_video = false;
+			return;
+		}
+	}
+	stopVideo(blank);
+}
+
+void cHisiLive::stopVideo(bool blank)
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
 	/* the picture to hold is frozen while it still runs: the stop and the
@@ -538,20 +592,32 @@ static hi_s32 multi_codec(int zapit_type)
 bool cHisiLive::DecodesAudio()
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
-	int t = p->audio_type;
+	int t = p->live.audio_type;
 	return t == AUDIO_MPEG || t == AUDIO_AAC || t == AUDIO_AACPLUS || (p->multi_config && multi_codec(t));
 }
 
 bool cHisiLive::StartAudio()
 {
+	{
+		std::lock_guard<std::mutex> lock(p->mutex);
+		if (p->playback)
+			return p->live_audio = true;
+	}
+	return startAudio();
+}
+
+bool cHisiLive::startAudio()
+{
 	std::lock_guard<std::mutex> lock(p->mutex);
-	if (p->audio_running || !p->pid[PID_AUDIO] || !AttachDemux())
+	priv::source &src = p->cur();
+	if (p->audio_running || !src.pid[PID_AUDIO] || !AttachDemux())
 		return false;
 	hi_u32 type;
-	hi_s32 multi = p->multi_config ? multi_codec(p->audio_type) : 0;
-	switch (p->audio_type)
+	hi_s32 multi = p->multi_config ? multi_codec(src.audio_type) : 0;
+	switch (src.audio_type)
 	{
 		case AUDIO_MPEG: type = HA_AUDIO_ID_MP2; break;
+		case AUDIO_MP3: type = HA_AUDIO_ID_MP3; break;
 		case AUDIO_AAC:
 		case AUDIO_AACPLUS: type = HA_AUDIO_ID_AAC; break;
 		default:
@@ -589,7 +655,7 @@ bool cHisiLive::StartAudio()
 	}
 	if (!p->video_running)
 		SetSync(HI_UNF_SYNC_REF_AUDIO);
-	hi_u32 apid = p->pid[PID_AUDIO];
+	hi_u32 apid = src.pid[PID_AUDIO];
 	p->HI_UNF_AVPLAY_SetAttr(p->avplay, HI_UNF_AVPLAY_ATTR_ID_AUD_PID, &apid);
 	hi_s32 r = p->HI_UNF_AVPLAY_Start(p->avplay, HI_UNF_AVPLAY_MEDIA_CHAN_AUD, NULL);
 	if (r != HI_SUCCESS)
@@ -602,6 +668,19 @@ bool cHisiLive::StartAudio()
 }
 
 void cHisiLive::StopAudio()
+{
+	{
+		std::lock_guard<std::mutex> lock(p->mutex);
+		if (p->playback)
+		{
+			p->live_audio = false;
+			return;
+		}
+	}
+	stopAudio();
+}
+
+void cHisiLive::stopAudio()
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
 	if (!p->audio_running)
@@ -626,12 +705,139 @@ void cHisiLive::Hide()
 	}
 }
 
+/* the TS buffer of the first free RAM port; the emulated devices may hold
+ * one for their own players */
+bool cHisiLive::OpenTsBuffer()
+{
+	for (hi_u32 i = 0; i < p->ram_ports && !p->ts_buffer; i++)
+		if (p->HI_UNF_DMX_CreateTSBuffer(HI_UNF_DMX_PORT_RAM_0 + i, PLAY_BUFFER_SIZE, &p->ts_buffer) == HI_SUCCESS)
+			p->ram_port = HI_UNF_DMX_PORT_RAM_0 + i;
+		else
+			p->ts_buffer = 0;
+	if (!p->ts_buffer)
+		hal_info("hisi live: no RAM port of %u for the players\n", p->ram_ports);
+	return p->ts_buffer != 0;
+}
+
+bool cHisiLive::StartPlayback(int video_format, int audio_type, bool sound)
+{
+	{
+		std::lock_guard<std::mutex> lock(p->mutex);
+		if (p->playback || (!p->ts_buffer && !OpenTsBuffer()))
+			return false;
+		p->HI_UNF_DMX_ResetTSBuffer(p->ts_buffer);
+		p->playback = true;
+		p->live_video = p->live_audio = false;
+		p->play.pid[PID_VIDEO] = PLAY_VIDEO_PID;
+		p->play.pid[PID_AUDIO] = sound ? PLAY_AUDIO_PID : 0;
+		p->play.pid[PID_PCR] = 0x1fff;
+		p->play.video_format = video_format;
+		p->play.audio_type = audio_type;
+	}
+	/* the sound first, so that the picture follows its time */
+	if ((sound && !startAudio()) || !startVideo())
+	{
+		hal_info("hisi live: no playback of video %d, audio %d\n", video_format, sound ? audio_type : -1);
+		StopPlayback();
+		return false;
+	}
+	return true;
+}
+
+void cHisiLive::StopPlayback()
+{
+	stopVideo(false);
+	stopAudio();
+	bool video, audio;
+	{
+		std::lock_guard<std::mutex> lock(p->mutex);
+		if (!p->playback)
+			return;
+		p->HI_UNF_DMX_ResetTSBuffer(p->ts_buffer);
+		p->playback = false;
+		video = p->live_video;
+		audio = p->live_audio;
+		p->live_video = p->live_audio = false;
+	}
+	/* the live TV that zapit started meanwhile */
+	if (video)
+		startVideo();
+	if (audio)
+		startAudio();
+}
+
+bool cHisiLive::Playing()
+{
+	std::lock_guard<std::mutex> lock(p->mutex);
+	return p->playback;
+}
+
+bool cHisiLive::Feed(const uint8_t *ts, size_t len)
+{
+	std::lock_guard<std::mutex> lock(p->mutex);
+	hi_stream_buf buf;
+	if (!p->playback || p->HI_UNF_DMX_GetTSBuffer(p->ts_buffer, len, &buf, 0) != HI_SUCCESS || buf.size < len)
+		return false;
+	memcpy(buf.data, ts, len);
+	return p->HI_UNF_DMX_PutTSBuffer(p->ts_buffer, len) == HI_SUCCESS;
+}
+
+void cHisiLive::ClearPlayback()
+{
+	std::lock_guard<std::mutex> lock(p->mutex);
+	if (!p->playback)
+		return;
+	/* the last picture, silent, until the stream is in sync again, as at
+	 * a start */
+	if (p->video_running)
+	{
+		/* a flush clears twice; the time from before the first counts */
+		filled<hi_avplay_status_info> st;
+		if (p->flushed_play_time == UINT32_MAX && p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &st.v) == HI_SUCCESS)
+			p->flushed_play_time = st.v.play_time;
+		p->HI_UNF_VO_FreezeWindow(p->window, 1, HI_UNF_WINDOW_FREEZE_MODE_LAST);
+		p->frozen = true;
+		p->HI_UNF_SND_SetTrackMute(p->track, 1);
+	}
+	p->HI_UNF_DMX_ResetTSBuffer(p->ts_buffer);
+	p->HI_UNF_AVPLAY_Reset(p->avplay, NULL);
+	if (p->video_running)
+	{
+		first_frame = true;
+		if (debug_frames)
+			video_start = now_ms();
+		std::thread(&cHisiLive::Reveal, this, ++p->start_count).detach();
+	}
+}
+
+void cHisiLive::PausePlayback(bool on)
+{
+	std::lock_guard<std::mutex> lock(p->mutex);
+	if (!p->playback)
+		return;
+	if (on)
+		p->HI_UNF_AVPLAY_Pause(p->avplay, NULL);
+	else
+		p->HI_UNF_AVPLAY_Resume(p->avplay, NULL);
+}
+
+/* fast forward and rewind show single pictures, without the sound */
+void cHisiLive::TrickPlayback(bool on)
+{
+	std::lock_guard<std::mutex> lock(p->mutex);
+	if (!p->playback)
+		return;
+	SetSync(on || !p->audio_running ? HI_UNF_SYNC_REF_NONE : HI_UNF_SYNC_REF_AUDIO);
+	p->HI_UNF_SND_SetTrackMute(p->track, on);
+}
+
 int64_t cHisiLive::GetPts()
 {
 	std::lock_guard<std::mutex> lock(p->mutex);
 	filled<hi_avplay_status_info> info;
 	hi_avplay_status_info &status = info.v;
-	if (!p->video_running || p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &status) != HI_SUCCESS)
+	if (!p->video_running || p->HI_UNF_AVPLAY_GetStatusInfo(p->avplay, &status) != HI_SUCCESS
+	    || status.last_vid_pts == UINT32_MAX)
 		return 0;
 	/* in ms, DVB counts 90 kHz */
 	return (int64_t)status.last_vid_pts * 90;
@@ -759,6 +965,7 @@ bool cHisiLive::Capture(const std::function<bool(const Frame &)> &use)
 
 void cHisiLive::Close()
 {
+	StopPlayback();
 	StopAudio();
 	Hide();
 	std::lock_guard<std::mutex> lock(p->mutex);
@@ -771,6 +978,9 @@ void cHisiLive::Close()
 	p->HI_UNF_AVPLAY_ChnClose(p->avplay, HI_UNF_AVPLAY_MEDIA_CHAN_VID | HI_UNF_AVPLAY_MEDIA_CHAN_AUD);
 	p->HI_UNF_AVPLAY_Destroy(p->avplay);
 	p->HI_UNF_DMX_DetachTSPort(p->dmx);
+	if (p->ts_buffer)
+		p->HI_UNF_DMX_DestroyTSBuffer(p->ts_buffer);
+	p->ts_buffer = 0;
 	unlink(HISI_DEMUX_FILE);
 	p->avplay = 0;
 }

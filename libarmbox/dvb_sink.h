@@ -50,5 +50,7 @@ class cDvbSink
 
 /* the video and audio devices of the live decoders */
 cDvbSink *newDeviceSink();
+/* the AVPLAY of live TV on the HiSilicon boxes, NULL elsewhere */
+cDvbSink *newHisiSink();
 
 #endif
