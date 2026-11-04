@@ -471,6 +471,15 @@ void GLFbPC::initKeys()
 	mRawKeyMap[KEY_GREEN]    = KEY_GREEN;
 	mRawKeyMap[KEY_YELLOW]   = KEY_YELLOW;
 	mRawKeyMap[KEY_BLUE]     = KEY_BLUE;
+	/* keys of infrared remote controls, under their own code */
+	static const int rc_keys[] = {
+		KEY_OK, KEY_EXIT, KEY_BACK, KEY_INFO, KEY_EPG, KEY_HELP, KEY_POWER, KEY_SLEEP,
+		KEY_AUDIO, KEY_SUBTITLE, KEY_MODE, KEY_SAT, KEY_TV, KEY_RADIO, KEY_VOD,
+		KEY_TEXT, KEY_FAVORITES, KEY_TIME, KEY_SCREEN, KEY_PREVIOUS, KEY_NEXT,
+		KEY_CHANNELUP, KEY_CHANNELDOWN, KEY_STOP
+	};
+	for (size_t k = 0; k < sizeof(rc_keys) / sizeof(rc_keys[0]); k++)
+		mRawKeyMap[rc_keys[k]] = rc_keys[k];
 	mKeyMap[SDLK_A] = KEY_AUDIO;
 	mKeyMap[SDLK_E] = KEY_EPG;
 	//     [SDLK_F]  is reserved to toggle fullscreen;
