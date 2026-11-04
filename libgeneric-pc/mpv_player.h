@@ -70,6 +70,8 @@ class cMpvEngine : public OpenThreads::Thread
 			double dar; /* as decoded, without video-aspect-override */
 			double fps;
 			bool drmprime; /* the frames stay in the decoder's memory */
+			bool interlaced; /* two woven fields per frame */
+			bool tff; /* the top one first */
 		};
 		struct AudioParams
 		{

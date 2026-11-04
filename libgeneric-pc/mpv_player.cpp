@@ -387,6 +387,7 @@ cMpvEngine::cMpvEngine()
 	mStatsTime = 0;
 	mVideo.valid = false;
 	mVideo.w = mVideo.h = 0;
+	mVideo.interlaced = mVideo.tff = false;
 	mVideo.sw = mVideo.sh = 0;
 	mVideo.aspect = 0;
 	mVideo.dar = 0;
@@ -440,6 +441,8 @@ cMpvEngine::cMpvEngine()
 	mpv_observe_property(h, 6, "demuxer-cache-duration", MPV_FORMAT_DOUBLE);
 	mpv_observe_property(h, 7, "video-dec-params/aspect", MPV_FORMAT_DOUBLE);
 	mpv_observe_property(h, 8, "track-list", MPV_FORMAT_NONE);
+	mpv_observe_property(h, 9, "video-frame-info/interlaced", MPV_FORMAT_FLAG);
+	mpv_observe_property(h, 10, "video-frame-info/tff", MPV_FORMAT_FLAG);
 	r = mpv_stream_cb_add_ro(h, LIVE_PROTOCOL, this, live_open);
 	if (r < 0)
 		hal_info("%s: no live TV, mpv_stream_cb_add_ro: %s\n", __func__, mpv_error_string(r));
@@ -553,6 +556,16 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 			{
 				mVideoLock.lock();
 				mVideo.dar = (p->format == MPV_FORMAT_DOUBLE) ? *(double *)p->data : 0;
+				mVideoLock.unlock();
+			}
+			else if (ev->reply_userdata == 9 || ev->reply_userdata == 10)
+			{
+				bool on = p->format == MPV_FORMAT_FLAG && *(int *)p->data;
+				mVideoLock.lock();
+				if (ev->reply_userdata == 9)
+					mVideo.interlaced = on;
+				else
+					mVideo.tff = on;
 				mVideoLock.unlock();
 			}
 			break;
@@ -745,6 +758,8 @@ void cMpvEngine::updateVideoParams(mpv_node *node)
 	mVideoLock.lock();
 	v.fps = mVideo.fps;
 	v.dar = mVideo.dar;
+	v.interlaced = mVideo.interlaced;
+	v.tff = mVideo.tff;
 	if (v.valid != mVideo.valid || v.w != mVideo.w || v.h != mVideo.h)
 		hal_info("%s: video %dx%d%s\n", __func__, v.w, v.h, v.valid ? "" : " (none)");
 	mVideo = v;

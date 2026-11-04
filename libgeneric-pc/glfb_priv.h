@@ -174,6 +174,8 @@ class GLFbPC
 		 * hardware that scans DRM PRIME frames itself) */
 		bool mPlaneOK; /* set up: mpv hands its frames to a plane below the window */
 		uint32_t mVideoPlane; /* a plane for the video below the primary one, the window stays there */
+		uint32_t mDeintProp; /* its bob deinterlacer, where it has one */
+		uint64_t mDeintValue[3]; /* off, top field first, bottom field first */
 		int mRenderFd; /* the render node mpv was given */
 		std::atomic<bool> mSuspendReq; /* suspend(): give the display away */
 		std::atomic<bool> mSuspended; /* the display is given away */

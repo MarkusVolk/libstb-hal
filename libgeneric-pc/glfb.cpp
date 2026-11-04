@@ -327,6 +327,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mPlatformInput = false;
 	mDrmFd = -1;
 	mVideoPlane = 0;
+	mDeintProp = 0;
+	memset(mDeintValue, 0, sizeof(mDeintValue));
 	mConnCheckNext = 0;
 	mEdidMissing = false;
 	mRenderFd = -1;
@@ -1868,6 +1870,29 @@ bool GLFbPC::setupPlane(void *params)
 	engine->setString("drm-drmprime-video-plane", mVideoPlane ? "overlay" : "primary");
 	engine->setString("drm-draw-plane", mVideoPlane ? "primary" : "overlay");
 
+	/* a plane that bobs interlaced frames itself is told about them */
+	mDeintProp = 0;
+	drmModeObjectProperties *pr = mVideoPlane ? drmModeObjectGetProperties(fd, mVideoPlane, DRM_MODE_OBJECT_PLANE) : NULL;
+	for (uint32_t i = 0; pr && i < pr->count_props; i++)
+	{
+		drmModePropertyRes *r = drmModeGetProperty(fd, pr->props[i]);
+		if (r && !strcmp(r->name, "deinterlace"))
+		{
+			mDeintProp = r->prop_id;
+			for (int e = 0; e < r->count_enums; e++)
+			{
+				if (!strcmp(r->enums[e].name, "off"))
+					mDeintValue[0] = r->enums[e].value;
+				else if (!strcmp(r->enums[e].name, "top first"))
+					mDeintValue[1] = r->enums[e].value;
+				else if (!strcmp(r->enums[e].name, "bottom first"))
+					mDeintValue[2] = r->enums[e].value;
+			}
+		}
+		drmModeFreeProperty(r);
+	}
+	drmModeFreeObjectProperties(pr);
+
 	mDrmFd = fd;
 	drm->fd = fd;
 	drm->crtc_id = crtc;
@@ -1914,6 +1939,11 @@ bool GLFbPC::renderPlane(cMpvEngine *engine)
 	glDisable(GL_BLEND);
 	int r = mpv_render_context_render(mRender, params);
 	restoreGLState();
+	if (mDeintProp && mPlaneReq)
+	{
+		cMpvEngine::VideoParams vp = engine->getVideoParams();
+		drmModeAtomicAddProperty(mPlaneReq, mVideoPlane, mDeintProp, mDeintValue[!vp.interlaced ? 0 : vp.tff ? 1 : 2]);
+	}
 	/* The commit waits for the flip, which paces the frames to the display
 	 * and lets the swap that is reported next to mpv be the real one. */
 	int c = (r >= 0 && mPlaneReq) ? drmModeAtomicCommit(mDrmFd, mPlaneReq, 0, NULL) : -1;
