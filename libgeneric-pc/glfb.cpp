@@ -931,7 +931,9 @@ void GLFbPC::pollEvents()
 			case SDL_EVENT_KEY_DOWN:
 				if (mPlatformInput)
 					break;
-				if (mTermFd >= 0)
+				/* keys of a remote control go to neutrino, which ends the
+				 * terminal on menu and hands the others on */
+				if (mTermFd >= 0 && !mRawKeyMap.count(ev.key.raw))
 					termKey(ev.key);
 				else if (!producesText(ev.key.key))
 					handleKey(ev.key.key, ev.key.scancode, ev.key.repeat, ev.key.raw);
