@@ -39,6 +39,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <linux/input.h>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
 #include <climits>
 #include <algorithm>
 #include <mpv/render_gl.h>
@@ -62,6 +64,105 @@
 #else
 #define DRMPRIME_OVERLAY_INTEROP "drmprime-drm"
 #endif
+
+static uint64_t planeProp(int fd, uint32_t plane, const char *name, bool *found)
+{
+	uint64_t value = 0;
+	drmModeObjectProperties *p = drmModeObjectGetProperties(fd, plane, DRM_MODE_OBJECT_PLANE);
+	for (uint32_t i = 0; p && i < p->count_props; i++)
+	{
+		drmModePropertyRes *r = drmModeGetProperty(fd, p->props[i]);
+		if (r && !strcmp(r->name, name))
+		{
+			value = p->prop_values[i];
+			if (found)
+				*found = true;
+		}
+		drmModeFreeProperty(r);
+	}
+	drmModeFreeObjectProperties(p);
+	return value;
+}
+
+/* A plane that scans out NV12 below the primary one. With that, the window
+ * stays on the primary plane; hardware without it has the primary plane at
+ * the bottom, and the window goes on an overlay plane above it. */
+static uint32_t videoPlaneBelowPrimary(int fd)
+{
+	uint32_t video = 0;
+	uint64_t video_z = 0, primary_z = 0;
+	bool have_primary = false;
+	drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+	drmModePlaneRes *res = drmModeGetPlaneResources(fd);
+	for (uint32_t i = 0; res && i < res->count_planes; i++)
+	{
+		drmModePlane *p = drmModeGetPlane(fd, res->planes[i]);
+		if (!p)
+			continue;
+		bool has_z = false;
+		uint64_t type = planeProp(fd, p->plane_id, "type", NULL);
+		uint64_t z = planeProp(fd, p->plane_id, "zpos", &has_z);
+		if (has_z && type == DRM_PLANE_TYPE_PRIMARY)
+		{
+			primary_z = z;
+			have_primary = true;
+		}
+		else if (has_z && type == DRM_PLANE_TYPE_OVERLAY)
+		{
+			for (uint32_t f = 0; f < p->count_formats; f++)
+				if (p->formats[f] == 0x3231564e /* NV12 */)
+				{
+					video = p->plane_id;
+					video_z = z;
+				}
+		}
+		drmModeFreePlane(p);
+	}
+	drmModeFreePlaneResources(res);
+	return (have_primary && video && video_z < primary_z) ? video : 0;
+}
+
+/* before SDL has opened the display */
+static uint32_t videoPlaneBelowPrimary()
+{
+	uint32_t plane = 0;
+	for (int i = 0; i < 4 && !plane; i++)
+	{
+		char dev[32];
+		snprintf(dev, sizeof(dev), "/dev/dri/card%d", i);
+		int fd = open(dev, O_RDWR | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		plane = videoPlaneBelowPrimary(fd);
+		close(fd);
+	}
+	return plane;
+}
+
+/* a stateless decoder hands its frames to mpv's v4l2request hwdec, which has
+ * an overlay interop of its own */
+static bool haveStatelessDecoder()
+{
+	bool found = false;
+	for (int i = 0; i < 8 && !found; i++)
+	{
+		char dev[32];
+		snprintf(dev, sizeof(dev), "/dev/video%d", i);
+		int fd = open(dev, O_RDWR | O_CLOEXEC | O_NONBLOCK);
+		if (fd < 0)
+			continue;
+		struct v4l2_fmtdesc d;
+		memset(&d, 0, sizeof(d));
+		d.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+		while (!found && ioctl(fd, VIDIOC_ENUM_FMT, &d) == 0)
+		{
+			found = d.pixelformat == V4L2_PIX_FMT_H264_SLICE;
+			d.index++;
+		}
+		close(fd);
+	}
+	return found;
+}
 
 
 extern cVideo *videoDecoder;
@@ -225,6 +326,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mExternalVideo = false;
 	mPlatformInput = false;
 	mDrmFd = -1;
+	mVideoPlane = 0;
 	mConnCheckNext = 0;
 	mEdidMissing = false;
 	mRenderFd = -1;
@@ -421,8 +523,13 @@ bool GLFbPC::createDisplay()
 	 * An SDL without the hint keeps the window on the primary plane, and
 	 * the video stays in GL. */
 	const char *plane = getenv("GLFB_VIDEO_PLANE");
+	mVideoPlane = 0;
 	if (!plane || strcmp(plane, "0"))
-		SDL_SetHint(SDL_HINT_KMSDRM_DISPLAY_PLANE, "overlay");
+	{
+		mVideoPlane = videoPlaneBelowPrimary();
+		if (!mVideoPlane)
+			SDL_SetHint(SDL_HINT_KMSDRM_DISPLAY_PLANE, "overlay");
+	}
 #endif
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
@@ -1710,7 +1817,7 @@ bool GLFbPC::setupRender()
 	mpv_render_context_set_update_callback(mRender, renderUpdateCb, this);
 	hal_info("GLFB::%s: libmpv render context ready (%s)\n", __func__, wl ? "wayland display" : x11 ? "x11 display" : drm.render_fd >= 0 ? "drm render node" : "no native display");
 	if (mPlaneOK)
-		hal_info("GLFB::%s: DRM PRIME video goes to the primary plane of CRTC %d, the window is above it\n", __func__, drm.crtc_id);
+		hal_info("GLFB::%s: DRM PRIME video goes to the %s plane of CRTC %d, the window is above it\n", __func__, mVideoPlane ? "video" : "primary", drm.crtc_id);
 	return true;
 }
 
@@ -1731,14 +1838,17 @@ bool GLFbPC::setupPlane(void *params)
 		drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
 		if (!c)
 			continue;
-		if (c->connection == DRM_MODE_CONNECTED && c->encoder_id)
+		if (c->connection == DRM_MODE_CONNECTED && (c->encoder_id || c->count_encoders))
 		{
-			drmModeEncoder *e = drmModeGetEncoder(fd, c->encoder_id);
+			/* before SDL's first frame nothing is lit yet: the CRTC it will take */
+			drmModeEncoder *e = drmModeGetEncoder(fd, c->encoder_id ? c->encoder_id : c->encoders[0]);
 			if (e && e->crtc_id)
-			{
 				crtc = e->crtc_id;
+			for (int k = 0; e && crtc < 0 && k < res->count_crtcs; k++)
+				if (e->possible_crtcs & (1 << k))
+					crtc = res->crtcs[k];
+			if (crtc >= 0)
 				connector = c->connector_id;
-			}
 			drmModeFreeEncoder(e);
 		}
 		drmModeFreeConnector(c);
@@ -1754,9 +1864,9 @@ bool GLFbPC::setupPlane(void *params)
 	if (!engine)
 		return false;
 	/* only the overlay interop: the frames are never drawn by the GPU */
-	engine->setString("gpu-hwdec-interop", DRMPRIME_OVERLAY_INTEROP);
-	engine->setString("drm-drmprime-video-plane", "primary");
-	engine->setString("drm-draw-plane", "overlay");
+	engine->setString("gpu-hwdec-interop", haveStatelessDecoder() ? "v4l2request-overlay" : DRMPRIME_OVERLAY_INTEROP);
+	engine->setString("drm-drmprime-video-plane", mVideoPlane ? "overlay" : "primary");
+	engine->setString("drm-draw-plane", mVideoPlane ? "primary" : "overlay");
 
 	mDrmFd = fd;
 	drm->fd = fd;
