@@ -188,6 +188,8 @@ class GLFbPC
 		GLuint mPlaneTex;
 		int mPlaneFboW;
 		int mPlaneFboH;
+		int mModeW; /* the display mode, which a scaled window is smaller than */
+		int mModeH;
 		double mMargins[4];
 		double mFit[2]; /* panscan and stretched aspect sent to mpv */
 		double mDar; /* of the video, as decoded */

@@ -339,6 +339,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mPlaneReq = NULL;
 	mPlaneFbo = mPlaneTex = 0;
 	mPlaneFboW = mPlaneFboH = 0;
+	mModeW = mModeH = 0;
 	mOsdSum = 0;
 	mPlaneRedraw = true;
 	mMargins[0] = mMargins[1] = mMargins[2] = mMargins[3] = 0;
@@ -1369,6 +1370,8 @@ void GLFbPC::render()
 		const SDL_DisplayMode *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(mWindow));
 		if (mode)
 			hal_info("%s: display mode %dx%d at %.2f Hz\n", __func__, mode->w, mode->h, mode->refresh_rate);
+		mModeW = mode ? mode->w : 0;
+		mModeH = mode ? mode->h : 0;
 		/* the screen stretches the display mode, and the window with it */
 		mPar = 1.0;
 		if (mScreenAR.num > 0 && mode && mode->w > 0 && mode->h > 0)
@@ -1936,7 +1939,10 @@ bool GLFbPC::renderPlane(cMpvEngine *engine)
 	planeMargins(engine);
 
 	mPlaneReq = drmModeAtomicAlloc();
-	mpv_opengl_fbo fbo = { (int)mPlaneFbo, w, h, 0 };
+	/* mpv places the plane in the target's coordinates, and the plane is
+	 * placed in the display mode's: a window that its own plane scales up
+	 * is smaller than that */
+	mpv_opengl_fbo fbo = { (int)mPlaneFbo, mModeW > 0 ? mModeW : w, mModeH > 0 ? mModeH : h, 0 };
 	/* mpv would wait for the frame's time and the commit for the vblank
 	 * after it, a frame late; the vblank alone keeps the time */
 	int block = 0;
