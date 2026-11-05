@@ -231,6 +231,7 @@ class GLFbPC
 		bool setupGLObjects(); /* shaders, textures and stuff */
 		void releaseGLObjects();
 		bool createDisplay();
+		void offerDisplayModes();
 		void releaseDisplay();
 		void drawSquare(float size, float x_factor = 1); /* do not be square */
 

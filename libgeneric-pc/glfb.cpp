@@ -50,6 +50,7 @@
 #include "platform.h"
 #include "video_lib.h"
 #include "audio_lib.h"
+#include "hardware_caps.h"
 
 #include "hal_debug.h"
 
@@ -612,11 +613,32 @@ bool GLFbPC::createDisplay()
 	}
 	if (!mUserEvent)
 		mUserEvent = SDL_RegisterEvents(1);
+	offerDisplayModes();
 	setupRender();
 	mReInit = true;
 	mOsdResize = true;
 	mState.blit = true;
 	return true;
+}
+
+/* The 2160p modes are offered where the display has them. */
+void GLFbPC::offerDisplayModes()
+{
+	static const struct { int std; float rate; } uhd[] = {
+		{ VIDEO_STD_2160P24, 24 }, { VIDEO_STD_2160P25, 25 }, { VIDEO_STD_2160P30, 30 },
+		{ VIDEO_STD_2160P50, 50 }
+	};
+	int n = 0;
+	SDL_DisplayMode **modes = SDL_GetFullscreenDisplayModes(SDL_GetDisplayForWindow(mWindow), &n);
+	for (int i = 0; modes && i < n; i++)
+	{
+		if (modes[i]->w != 3840 || modes[i]->h != 2160)
+			continue;
+		for (size_t j = 0; j < sizeof(uhd) / sizeof(uhd[0]); j++)
+			if (fabsf(modes[i]->refresh_rate - uhd[j].rate) < 0.5f)
+				get_hwcaps()->video_std_mask |= VIDEO_STD_BIT(uhd[j].std);
+	}
+	SDL_free(modes);
 }
 
 /* everything createDisplay() made: with SDL's video gone, so is its hold on the display and the input devices */
