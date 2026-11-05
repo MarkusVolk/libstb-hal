@@ -1671,7 +1671,7 @@ void GLFbPC::render()
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	/* on a screen that stretches the window, the video takes all of it and
 	 * the OSD only its part; the picture in the menus stays in the OSD's */
-	const bool video_full = mScreenAR.num > 0 && !(pig[0] > 0 && pig[1] > 0 && pig[2] > 0 && pig[3] > 0);
+	const bool video_full = mScreenAR.num > 0 && !(pig[0] >= 0 && pig[1] >= 0 && pig[2] > 0 && pig[3] > 0);
 	if (video_full)
 		glViewport(0, 0, mWinW, mWinH);
 	else
@@ -2248,7 +2248,7 @@ bool GLFbPC::renderPlane(cMpvEngine *engine)
 void GLFbPC::planeMargins(cMpvEngine *engine)
 {
 	double m[4] = { 0, 0, 0, 0 };
-	if (videoDecoder && videoDecoder->pig_x > 0 && videoDecoder->pig_y > 0 &&
+	if (videoDecoder && videoDecoder->pig_x >= 0 && videoDecoder->pig_y >= 0 &&
 	    videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0 && mOsdW > 0 && mOsdH > 0)
 	{
 		/* the OSD's part of the window */
@@ -2418,7 +2418,7 @@ void GLFbPC::drawSquare(float size, float x_factor)
 	if (x_factor > -99.0) /* x_factor == -100 => OSD */
 	{
 		if (videoDecoder &&
-			videoDecoder->pig_x > 0 && videoDecoder->pig_y > 0 &&
+			videoDecoder->pig_x >= 0 && videoDecoder->pig_y >= 0 &&
 			videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0)
 		{
 			/* these calculations even consider cropping and panscan mode
@@ -2596,7 +2596,7 @@ bool GLFbPC::directVideo(int w, int h)
 		return false;
 	if (av_cmp_q(mVA, mOA))
 		return false;
-	if (videoDecoder && videoDecoder->pig_x > 0 && videoDecoder->pig_y > 0 &&
+	if (videoDecoder && videoDecoder->pig_x >= 0 && videoDecoder->pig_y >= 0 &&
 	    videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0)
 		return false;
 	return true;
