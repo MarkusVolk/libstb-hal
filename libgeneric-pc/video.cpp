@@ -25,6 +25,8 @@
 
 #include "config.h"
 #include <unistd.h>
+#include <dirent.h>
+#include <string>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -51,6 +53,7 @@ extern "C" {
 #include "hal_debug.h"
 #include "hdmi_cec.h"
 #include "platform.h"
+#include "proc_tools.h"
 
 #include <mpv/client.h>
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_VIDEO, this, args)
@@ -603,11 +606,38 @@ void cVideo::StopPicture()
 	still_m.unlock();
 }
 
+/* The LEDs Linux names after what a device does follow it: <which>:power is
+ * lit while it runs, <which>:standby while it sleeps. */
+static void standby_leds(bool on)
+{
+	DIR *dir = opendir("/sys/class/leds");
+	if (!dir)
+		return;
+	while (struct dirent *e = readdir(dir))
+	{
+		const char *function = strrchr(e->d_name, ':');
+		bool lit;
+		if (function && !strcmp(function, ":standby"))
+			lit = on;
+		else if (function && !strcmp(function, ":power"))
+			lit = !on;
+		else
+			continue;
+		std::string led = std::string("/sys/class/leds/") + e->d_name;
+		char level[16] = "0";
+		if (lit && proc_get((led + "/max_brightness").c_str(), level, sizeof(level)) <= 0)
+			strcpy(level, "1");
+		proc_put((led + "/brightness").c_str(), level, strlen(level));
+	}
+	closedir(dir);
+}
+
 void cVideo::Standby(unsigned int bOn)
 {
 	hdmi_cec::getInstance()->SetCECState(bOn);
 	if (platform_standby(bOn))
 		return;
+	standby_leds(bOn);
 	/* under a desktop the window has no business staying around in standby */
 	if (glfb_priv && (getenv("WAYLAND_DISPLAY") || getenv("DISPLAY")))
 		glfb_priv->setHidden(bOn);
