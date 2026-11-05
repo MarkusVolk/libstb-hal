@@ -207,7 +207,7 @@ class GLFbPC
 		void drawOSD();
 		uint64_t osdScan(int box[4]); /* one pass: where the OSD shows anything, and a sum of it */
 		uint64_t mOsdSum; /* of the OSD that is on the window's plane */
-		bool mPlaneRedraw;
+		int mPlaneRedraw; /* swaps the window needs although the OSD did not change */
 		bool directVideo(int w, int h);
 		bool renderDirect();
 		/* a gamepad as remote control: what is held down repeats */

@@ -341,7 +341,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mPlaneFboW = mPlaneFboH = 0;
 	mModeW = mModeH = 0;
 	mOsdSum = 0;
-	mPlaneRedraw = true;
+	mPlaneRedraw = 1;
 	mMargins[0] = mMargins[1] = mMargins[2] = mMargins[3] = 0;
 	mFit[0] = mFit[1] = 0;
 	mDar = 0;
@@ -1332,6 +1332,9 @@ void GLFbPC::render()
 			const float rate = mWantRate;
 			mReInitLock.unlock();
 			applyDisplayMode(w, h, rate, "the video system");
+			/* SDL sets the mode while it swaps: the first swap only makes
+			 * its new surfaces, the second one shows a picture again */
+			mPlaneRedraw = 2;
 			mReInitLock.lock();
 		}
 	}
@@ -1441,7 +1444,7 @@ void GLFbPC::render()
 	{
 		mOnPlane = on_plane;
 		mState.blit = true; /* the window is drawn anew in either case */
-		mPlaneRedraw = true;
+		mPlaneRedraw = 1;
 		hal_info("GLFB::%s: the video is %s\n", __func__, on_plane ? "on the plane below the window" : "drawn in the window");
 	}
 	/* the margins of the picture in the menus are mpv options and stay;
@@ -1507,7 +1510,8 @@ void GLFbPC::render()
 		if (sum == mOsdSum && !reinit && !mPlaneRedraw)
 			return;
 		mOsdSum = sum;
-		mPlaneRedraw = false;
+		if (mPlaneRedraw)
+			mPlaneRedraw--;
 
 		/* the window: transparent where nothing but the video is */
 		bltOSDBuffer(box);
