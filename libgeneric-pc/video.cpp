@@ -154,8 +154,6 @@ cVideo::cVideo(int, void *, void *, unsigned int)
 
 cVideo::~cVideo(void)
 {
-	if (hdmi_cec::getInstance()->standby_cec_activ)
-		hdmi_cec::getInstance()->SetCECState(true);
 	Stop();
 	/* ouch :-( */
 	videoDecoder = NULL;
