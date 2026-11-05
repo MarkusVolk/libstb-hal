@@ -10,6 +10,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <glob.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,41 @@
 
 static int initialized = 0;
 static hw_caps_t caps;
+
+/* A line display as the auxdisplay drivers of the kernel make them: the text
+ * goes into its attribute "message". Up to four characters are the number
+ * display of a set-top box. */
+static void probe_display(void)
+{
+	glob_t g;
+	if (glob("/sys/bus/*/devices/*/linedisp.*/message", 0, NULL, &g))
+		return;
+	const char *message = g.gl_pathv[0];
+	if (strlen(message) < sizeof(caps.display_dev))
+	{
+		char path[sizeof(caps.display_dev) + 8];
+		int dir = strrchr(message, '/') - message;
+		int chars = 0;
+		strcpy(caps.display_dev, message);
+		snprintf(path, sizeof(path), "%.*s/num_chars", dir, message);
+		FILE *f = fopen(path, "r");
+		if (f)
+		{
+			if (fscanf(f, "%d", &chars) == 1 && chars > 0)
+				caps.display_xres = chars;
+			fclose(f);
+		}
+		if (caps.display_xres <= 4)
+		{
+			caps.display_type = HW_DISPLAY_LED_NUM;
+			caps.display_has_channel_number = 1;
+		}
+		/* the driver of the display says so where it shows "hh:mm" with a colon */
+		snprintf(path, sizeof(path), "%.*s/../colon", dir, message);
+		caps.display_has_colon = !access(path, F_OK);
+	}
+	globfree(&g);
+}
 
 hw_caps_t *get_hwcaps(void)
 {
@@ -69,6 +105,7 @@ hw_caps_t *get_hwcaps(void)
 	}
 	else
 		fprintf(stderr, "%s: uname() failed: %m\n", __func__);
+	probe_display();
 	platform_caps(&caps);
 
 	initialized = 1;
