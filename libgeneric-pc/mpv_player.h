@@ -21,6 +21,7 @@
 #define __MPV_PLAYER_H__
 
 #include <stdint.h>
+#include <atomic>
 #include <string>
 #include <vector>
 #include <map>
@@ -210,6 +211,7 @@ class cMpvEngine : public OpenThreads::Thread
 		int64_t mStateEnded;
 		bool mAborted;
 		int mAbortGen;
+		std::atomic<int> mStopsQueued;	/* stops of live TV that mpv has not run yet */
 		bool mEof;
 		bool mIdle;
 		int mLastError;

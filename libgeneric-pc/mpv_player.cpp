@@ -70,6 +70,8 @@ static OpenThreads::Mutex instanceLock;
  * stream. mpv then knows the codecs without guessing and sees one audio track.
  */
 #define LIVE_PROTOCOL		"tsdmx"
+/* reply_userdata of the stop that liveStop() queues */
+#define REPLY_LIVE_STOP		100
 #define LIVE_DMX_BUFFER		(4 * 1024 * 1024)
 #define LIVE_PSI_INTERVAL_MS	400
 #define TS_SIZE			188
@@ -381,7 +383,7 @@ cMpvEngine::cMpvEngine()
 	: mWantEntry(0), mStartedEntry(0), mLoadedEntry(0),
 	  mOwner(OWNER_NONE), mLiveSerial(0),
 	  mLiveVideoOn(false), mLiveAudioOn(false), mLiveSpeed(1.0), mLiveTarget(0.5), mLivePaused(false), mLiveClockTime(0), mLiveClockTicks(0), mTimePos(0), mNoDeinterlace(false),
-	  mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mStateLoaded(0), mStateEnded(0), mAborted(false), mAbortGen(0),
+	  mpv(NULL), mQuit(false), mLoaded(false), mFailed(false), mStateLoaded(0), mStateEnded(0), mAborted(false), mAbortGen(0), mStopsQueued(0),
 	  mEof(false), mIdle(true), mLastError(0), mTracksValid(false), mTracksGen(0)
 {
 	mStatsTime = 0;
@@ -506,6 +508,10 @@ void cMpvEngine::handleEvent(mpv_event *ev)
 		}
 		case MPV_EVENT_END_FILE:
 			handleEndFile((mpv_event_end_file *)ev->data);
+			break;
+		case MPV_EVENT_COMMAND_REPLY:
+			if (ev->reply_userdata == REPLY_LIVE_STOP)
+				mStopsQueued--;
 			break;
 		case MPV_EVENT_PLAYBACK_RESTART:
 			liveReport();
@@ -822,6 +828,10 @@ bool cMpvEngine::load(const std::string &url, const std::vector<std::string> &he
 	mLiveSerial++;
 	mLiveSpeed = 1.0;
 	mLiveLock.unlock();
+	/* mpv runs what it is asked directly, as from here on, ahead of what
+	 * was queued for it: the stop of live TV must be through first */
+	for (int i = 0; i < 200 && mStopsQueued > 0; i++)
+		usleep(10000);
 	setDouble("speed", 1.0);
 	mStateLock.lock();
 	mLoaded = false;
@@ -1364,16 +1374,20 @@ void cMpvEngine::liveStop()
 		mLiveSerial++;
 		mTimePos = 0;
 		memset(&mLive, 0, sizeof(mLive));
+		/* queued and counted before the lock is given up: a load() from
+		 * another thread takes the player under this lock and then waits
+		 * for mpv to have run the stop, which would end its file otherwise */
+		renderBlock();
+		const char *cmd[] = { "stop", NULL };
+		mStopsQueued++;
+		if (mpv_command_async(mpv, REPLY_LIVE_STOP, cmd) < 0)
+			mStopsQueued--;
+		static const char *one = "1.0";
+		mpv_set_property_async(mpv, 0, "speed", MPV_FORMAT_STRING, (void *)&one);
 	}
 	mLiveLock.unlock();
-	if (!live)
-		return;
-	hal_info("%s\n", __func__);
-	renderBlock();
-	const char *cmd[] = { "stop", NULL };
-	mpv_command_async(mpv, 0, cmd);
-	static const char *one = "1.0";
-	mpv_set_property_async(mpv, 0, "speed", MPV_FORMAT_STRING, (void *)&one);
+	if (live)
+		hal_info("%s\n", __func__);
 }
 
 bool cMpvEngine::liveParams(int serial, LiveParams &p)
