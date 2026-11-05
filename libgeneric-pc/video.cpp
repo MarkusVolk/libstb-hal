@@ -361,6 +361,9 @@ static bool video_std_mode(int system, int *w, int *h, float *rate)
 		case VIDEO_STD_2160P50:
 			*w = 3840; *h = 2160; *rate = 50;
 			break;
+		case VIDEO_STD_2160P60:
+			*w = 3840; *h = 2160; *rate = 60;
+			break;
 		case VIDEO_STD_AUTO:
 			hal_info_c("%s: VIDEO_STD_AUTO not implemented\n", __func__);
 			return false;

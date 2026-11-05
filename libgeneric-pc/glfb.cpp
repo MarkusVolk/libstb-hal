@@ -626,7 +626,7 @@ void GLFbPC::offerDisplayModes()
 {
 	static const struct { int std; float rate; } uhd[] = {
 		{ VIDEO_STD_2160P24, 24 }, { VIDEO_STD_2160P25, 25 }, { VIDEO_STD_2160P30, 30 },
-		{ VIDEO_STD_2160P50, 50 }
+		{ VIDEO_STD_2160P50, 50 }, { VIDEO_STD_2160P60, 60 }
 	};
 	int n = 0;
 	SDL_DisplayMode **modes = SDL_GetFullscreenDisplayModes(SDL_GetDisplayForWindow(mWindow), &n);
