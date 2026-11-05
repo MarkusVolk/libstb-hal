@@ -41,6 +41,7 @@
 #include <linux/input.h>
 #include <linux/videodev2.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <climits>
 #include <algorithm>
 #include <mpv/render_gl.h>
@@ -203,6 +204,11 @@ void GLFramebuffer::blit()
 	glfb_priv->blit();
 }
 
+bool GLFramebuffer::setSource(int fd)
+{
+	return glfb_priv->setSource(fd);
+}
+
 void GLFramebuffer::setTerminalFd(int fd)
 {
 	glfb_priv->mTermFd = fd;
@@ -335,6 +341,12 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mRenderFd = -1;
 	mSuspendReq = false;
 	mSuspended = false;
+	mSourceOK = false;
+	mSourceFd = -1;
+	mSourceTex = 0;
+	mEglCreateImage = NULL;
+	mEglDestroyImage = NULL;
+	mGlImageTarget = NULL;
 	mWindow = NULL;
 	mContext = NULL;
 	mPlaneReq = NULL;
@@ -385,6 +397,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 GLFbPC::~GLFbPC()
 {
 	mShutDown = true;
+	setSource(-1);
 	if (input_fd >= 0)
 		close(input_fd);
 	osd_buf->clear();
@@ -844,12 +857,20 @@ bool GLFbPC::setupGLObjects()
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	/* for setSource(): a context on EGL that takes dmabufs as textures */
+	mEglCreateImage = (void *(*)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *))SDL_EGL_GetProcAddress("eglCreateImageKHR");
+	mEglDestroyImage = (EGLBoolean (*)(EGLDisplay, EGLImageKHR))SDL_EGL_GetProcAddress("eglDestroyImageKHR");
+	mGlImageTarget = (void (*)(GLenum, void *))SDL_GL_GetProcAddress("glEGLImageTargetTexture2DOES");
+	mSourceOK = SDL_EGL_GetCurrentDisplay() && mEglCreateImage && mEglDestroyImage && mGlImageTarget &&
+		    SDL_GL_ExtensionSupported("GL_OES_EGL_image");
 	return true;
 }
 
 
 void GLFbPC::releaseGLObjects()
 {
+	dropSource();
 	glDeleteTextures(1, &mState.osdtex);
 	glDeleteTextures(1, &mState.displaytex);
 	glDeleteProgram(mState.program);
@@ -1339,6 +1360,8 @@ void GLFbPC::render()
 	/* NULL after shutdown(); fetched once, the helpers below get it passed */
 	cMpvEngine *engine = cMpvEngine::getInstance();
 
+	serviceSource();
+
 	mReInitLock.lock();
 	if (mModeChange)
 	{
@@ -1544,6 +1567,7 @@ void GLFbPC::render()
 		glClearColor(0.0, 0.0, 0.0, 1.0);
 		drawOSD();
 		SDL_GL_SwapWindow(mWindow);
+		sourceDone();
 		return;
 	}
 
@@ -1749,6 +1773,7 @@ void GLFbPC::render()
 
 	uint64_t t_draw = SDL_GetTicksNS();
 	SDL_GL_SwapWindow(mWindow);
+	sourceDone();
 	uint64_t t_swap = SDL_GetTicksNS();
 	/* a redraw takes a frame along that arrived in the meantime, so mpv is
 	 * told about every swap of something it drew, or it would wait for one */
@@ -1788,6 +1813,222 @@ static void *glGetProc(void *, const char *name)
 /* static */ void GLFbPC::renderUpdateCb(void *ctx)
 {
 	((GLFbPC *)ctx)->wake();
+}
+
+/*
+ * The pictures of another program in place of the OSD. The program renders
+ * with the GPU into buffers of its own and sends them over a SOCK_SEQPACKET
+ * socket, one message a packet:
+ *
+ *   buffer <id> <width> <height> <stride> <fourcc> <modifier>
+ *           with the dmabuf of the buffer attached, once for each buffer
+ *   frame <id>
+ *           the buffer with a finished picture; it must stay untouched
+ *           until a later one has been confirmed
+ *
+ * and gets "done <id>" when that picture is on the display, which is when
+ * it may render the next one. The pictures are stretched over the area of
+ * the OSD, transparent where the video is to show.
+ */
+bool GLFbPC::setSource(int fd)
+{
+	if (mSourceThread.joinable())
+	{
+		shutdown(mSourceFd, SHUT_RDWR);
+		mSourceThread.join();
+	}
+	{
+		std::lock_guard<std::mutex> lk(mSourceMutex);
+		if (mSourceFd >= 0)
+			close(mSourceFd);
+		mSourceFd = -1;
+		for (auto &m : mSourceQueue)
+			if (m.type == SourceMsg::BUFFER)
+				close(m.fd);
+		mSourceQueue.clear();
+		SourceMsg end = {};
+		end.type = SourceMsg::END;
+		mSourceQueue.push_back(end);
+		if (fd >= 0 && mSourceOK)
+			mSourceFd = fd;
+	}
+	mState.blit = true;
+	wake();
+	if (fd < 0)
+		return true;
+	if (mSourceFd < 0)
+		return false;
+	mSourceThread = std::thread(&GLFbPC::sourceReader, this, fd);
+	return true;
+}
+
+void GLFbPC::sourceReader(int fd)
+{
+	char text[128];
+	for (;;)
+	{
+		union
+		{
+			char buf[CMSG_SPACE(sizeof(int))];
+			struct cmsghdr align;
+		} control;
+		struct iovec iov = { text, sizeof(text) - 1 };
+		struct msghdr msg = {};
+		msg.msg_iov = &iov;
+		msg.msg_iovlen = 1;
+		msg.msg_control = control.buf;
+		msg.msg_controllen = sizeof(control.buf);
+		ssize_t n = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+			break;
+		text[n] = 0;
+		int got = -1;
+		for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c))
+			if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
+				memcpy(&got, CMSG_DATA(c), sizeof(got));
+
+		SourceMsg m = {};
+		m.fd = -1;
+		unsigned long long modifier;
+		if (got >= 0 && sscanf(text, "buffer %u %d %d %d %u %llu", &m.id, &m.width, &m.height, &m.stride, &m.format, &modifier) == 6)
+		{
+			m.type = SourceMsg::BUFFER;
+			m.fd = got;
+			m.modifier = modifier;
+		}
+		else if (sscanf(text, "frame %u", &m.id) == 1)
+			m.type = SourceMsg::FRAME;
+		else
+		{
+			hal_info("GLFB::%s: unknown message '%s'\n", __func__, text);
+			if (got >= 0)
+				close(got);
+			continue;
+		}
+		if (m.type != SourceMsg::BUFFER && got >= 0)
+			close(got);
+		{
+			std::lock_guard<std::mutex> lk(mSourceMutex);
+			mSourceQueue.push_back(m);
+		}
+		mState.blit = true;
+		wake();
+	}
+	hal_info("GLFB::%s: the source has gone\n", __func__);
+}
+
+void GLFbPC::importSource(const SourceMsg &m)
+{
+	std::vector<EGLint> attr = {
+		EGL_WIDTH, m.width,
+		EGL_HEIGHT, m.height,
+		EGL_LINUX_DRM_FOURCC_EXT, (EGLint)m.format,
+		EGL_DMA_BUF_PLANE0_FD_EXT, m.fd,
+		EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+		EGL_DMA_BUF_PLANE0_PITCH_EXT, m.stride,
+	};
+	if (m.modifier != 0x00ffffffffffffffULL) /* DRM_FORMAT_MOD_INVALID */
+	{
+		attr.push_back(EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT);
+		attr.push_back((EGLint)(m.modifier & 0xffffffff));
+		attr.push_back(EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT);
+		attr.push_back((EGLint)(m.modifier >> 32));
+	}
+	attr.push_back(EGL_NONE);
+
+	auto old = mSourceBufs.find(m.id);
+	if (old != mSourceBufs.end())
+	{
+		if (mSourceTex == old->second.tex)
+			mSourceTex = 0;
+		glDeleteTextures(1, &old->second.tex);
+		mEglDestroyImage(SDL_EGL_GetCurrentDisplay(), old->second.image);
+		mSourceBufs.erase(old);
+	}
+	SourceBuffer b;
+	b.image = mEglCreateImage(SDL_EGL_GetCurrentDisplay(), EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attr.data());
+	close(m.fd);
+	if (b.image == EGL_NO_IMAGE_KHR)
+	{
+		hal_info("GLFB::%s: buffer %u (%dx%d, stride %d, format %.4s) is not taken\n", __func__,
+			 m.id, m.width, m.height, m.stride, (const char *)&m.format);
+		return;
+	}
+	glGenTextures(1, &b.tex);
+	glBindTexture(GL_TEXTURE_2D, b.tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	mGlImageTarget(GL_TEXTURE_2D, b.image);
+	mSourceBufs[m.id] = b;
+	hal_debug("GLFB::%s: buffer %u, %dx%d\n", __func__, m.id, m.width, m.height);
+}
+
+void GLFbPC::dropSource()
+{
+	for (auto &b : mSourceBufs)
+	{
+		glDeleteTextures(1, &b.second.tex);
+		mEglDestroyImage(SDL_EGL_GetCurrentDisplay(), b.second.image);
+	}
+	mSourceBufs.clear();
+	mSourceShown.clear();
+	if (mSourceTex)
+	{
+		/* the OSD again, all of it */
+		mSourceTex = 0;
+		mOsdFull = true;
+		if (!mPlaneRedraw)
+			mPlaneRedraw = 1;
+	}
+}
+
+void GLFbPC::serviceSource()
+{
+	std::vector<SourceMsg> msgs;
+	{
+		std::lock_guard<std::mutex> lk(mSourceMutex);
+		msgs.swap(mSourceQueue);
+	}
+	for (auto &m : msgs)
+	{
+		if (m.type == SourceMsg::END)
+			dropSource();
+		else if (m.type == SourceMsg::BUFFER)
+			importSource(m);
+		else
+		{
+			auto b = mSourceBufs.find(m.id);
+			if (b != mSourceBufs.end())
+				mSourceTex = b->second.tex;
+			/* confirmed in either case, or the program waits for ever;
+			 * and drawn in this pass: the reader's request for one may
+			 * have been taken by the pass before, which did not know
+			 * the picture yet */
+			mSourceShown.push_back(m.id);
+			mState.blit = true;
+			if (!mPlaneRedraw)
+				mPlaneRedraw = 1;
+		}
+	}
+}
+
+void GLFbPC::sourceDone()
+{
+	if (mSourceShown.empty())
+		return;
+	std::lock_guard<std::mutex> lk(mSourceMutex);
+	for (unsigned id : mSourceShown)
+	{
+		char text[32];
+		int n = snprintf(text, sizeof(text), "done %u", id);
+		if (mSourceFd >= 0)
+			(void)!send(mSourceFd, text, n, MSG_NOSIGNAL | MSG_DONTWAIT);
+	}
+	mSourceShown.clear();
 }
 
 void GLFbPC::wake()
@@ -2305,6 +2546,17 @@ uint64_t GLFbPC::osdScan(int box[4])
 
 void GLFbPC::drawOSD()
 {
+	if (mSourceTex)
+	{
+		/* the other program's picture, which has its colours multiplied
+		 * with its alpha already */
+		glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+		glUniform1f(mState.u_bgra, 0.0);
+		glBindTexture(GL_TEXTURE_2D, mSourceTex);
+		drawSquare(1.0, -100);
+		glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+		return;
+	}
 	if (mOsdBox[2] <= mOsdBox[0] || mOsdBox[3] <= mOsdBox[1])
 		return;
 

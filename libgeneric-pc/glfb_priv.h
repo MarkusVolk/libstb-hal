@@ -26,10 +26,12 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <OpenThreads/Mutex>
 #include <vector>
 #include <map>
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_egl.h>
 #include <GLES2/gl2.h>
 #include <linux/fb.h> /* for screeninfo etc. */
 #include "glfb.h"
@@ -205,6 +207,40 @@ class GLFbPC
 		std::atomic<unsigned> mViewGen;
 		bool mTexStale; /* the video was drawn directly, mVideoTex has an old frame */
 		void drawOSD();
+		/* the pictures of another program in place of the OSD, see setSource() */
+		struct SourceMsg
+		{
+			enum { BUFFER, FRAME, END } type;
+			unsigned id;
+			int fd;
+			int width;
+			int height;
+			int stride;
+			uint32_t format;
+			uint64_t modifier;
+		};
+		struct SourceBuffer
+		{
+			EGLImageKHR image;
+			GLuint tex;
+		};
+		bool setSource(int fd);
+		void sourceReader(int fd);
+		void serviceSource();
+		void importSource(const SourceMsg &m);
+		void dropSource();
+		void sourceDone();
+		std::atomic<bool> mSourceOK; /* the GL context can import dmabufs */
+		std::thread mSourceThread; /* reads the socket */
+		std::mutex mSourceMutex; /* the queue and the socket */
+		int mSourceFd;
+		std::vector<SourceMsg> mSourceQueue; /* from the reader to the GL thread */
+		std::map<unsigned, SourceBuffer> mSourceBufs; /* the GL thread's */
+		GLuint mSourceTex; /* the picture that is shown, 0 for the OSD */
+		std::vector<unsigned> mSourceShown; /* pictures to confirm after the next swap */
+		void *(*mEglCreateImage)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
+		EGLBoolean (*mEglDestroyImage)(EGLDisplay, EGLImageKHR);
+		void (*mGlImageTarget)(GLenum, void *);
 		uint64_t osdScan(int box[4]); /* one pass: where the OSD shows anything, and a sum of it */
 		uint64_t mOsdSum; /* of the OSD that is on the window's plane */
 		int mPlaneRedraw; /* swaps the window needs although the OSD did not change */

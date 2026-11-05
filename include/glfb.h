@@ -46,6 +46,11 @@ class GLFramebuffer : public OpenThreads::Thread
 		 * and takes them back; the OSD buffer stays */
 		void suspend();
 		void resume();
+		/* shows the pictures of another program in place of the OSD until
+		 * the same with -1. It sends them over the socket fd, which is the
+		 * framebuffer's from then on; glfb.cpp has what it sends. false
+		 * where the display cannot take such pictures */
+		bool setSource(int fd);
 
 	private:
 		fb_var_screeninfo si;
