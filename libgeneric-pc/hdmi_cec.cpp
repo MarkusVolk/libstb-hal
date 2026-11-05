@@ -228,7 +228,8 @@ bool hdmi_cec::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)
 	{
 		GetCECAddressInfo();
 
-		if (autoview_cec_activ)
+		/* with the kernel's adapter the thread sends this once it is configured, see stateChanged() */
+		if (autoview_cec_activ && !fallback)
 			SetCECState(false);
 
 		Start();
@@ -296,7 +297,9 @@ void hdmi_cec::GetCECAddressInfo()
 			{
 				hal_info(GREEN "[CEC] %s: detected physical address change: %02X%02X --> %02X%02X\n" NORMAL, __func__, physicalAddress[0], physicalAddress[1], addressinfo.physical[0], addressinfo.physical[1]);
 				memcpy(physicalAddress, addressinfo.physical, sizeof(physicalAddress));
-				ReportPhysicalAddress();
+				/* the kernel's adapter reports its address itself */
+				if (!fallback)
+					ReportPhysicalAddress();
 			}
 		}
 	}
