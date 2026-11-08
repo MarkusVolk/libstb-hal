@@ -23,7 +23,9 @@
 #ifndef __glfb_priv__
 #define __glfb_priv__
 #include <stdint.h>
+#include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -33,6 +35,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_egl.h>
 #include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 #include <linux/fb.h> /* for screeninfo etc. */
 #include "glfb.h"
 #include "mpv_player.h"
@@ -58,8 +61,25 @@ class GLFbPC
 		{
 			return mState.height;
 		}
-		void blit()
+		void blit(const int *rect)
 		{
+			{
+				std::lock_guard<std::mutex> lock(mDamageLock);
+				if (!rect)
+					mDamageAll = true;
+				else if (rect[2] > rect[0] && rect[3] > rect[1])
+				{
+					if (mDamage[2] <= mDamage[0] || mDamage[3] <= mDamage[1])
+						memcpy(mDamage, rect, sizeof(mDamage));
+					else
+					{
+						mDamage[0] = std::min(mDamage[0], rect[0]);
+						mDamage[1] = std::min(mDamage[1], rect[1]);
+						mDamage[2] = std::max(mDamage[2], rect[2]);
+						mDamage[3] = std::max(mDamage[3], rect[3]);
+					}
+				}
+			}
 			mState.blit = true;
 			wake();
 		};
@@ -159,6 +179,15 @@ class GLFbPC
 		void termText(const char *text);
 		void termWrite(uint32_t code, uint32_t unicode, uint32_t mods);
 		int mOsdBox[4]; /* x0, y0, x1, y1 of what the OSD shows; empty when x1 <= x0 */
+		/* what has changed in the OSD buffer since the GL thread last took it,
+		 * as blit() was told; mDamageAll when anything may have */
+		std::mutex mDamageLock;
+		int mDamage[4] = { 0, 0, 0, 0 };
+		bool mDamageAll = true;
+		bool takeDamage(int rect[4]);
+		bool mUnpackRow = false; /* GL_EXT_unpack_subimage: the texture takes a part of a row */
+		void uploadOSD(int x0, int y0, int x1, int y1);
+		void bltOSDDamage(const int *rect);
 		bool mDirect; /* what the log said last about how the video is drawn */
 		int mLastPig[4]; /* what the last picture on the screen was drawn with */
 		bool mLastDirect;

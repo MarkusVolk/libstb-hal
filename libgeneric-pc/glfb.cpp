@@ -199,9 +199,9 @@ GLFramebuffer::~GLFramebuffer()
 	glfb_priv = NULL;
 }
 
-void GLFramebuffer::blit()
+void GLFramebuffer::blit(const int *rect)
 {
-	glfb_priv->blit();
+	glfb_priv->blit(rect);
 }
 
 bool GLFramebuffer::setSource(int fd)
@@ -844,6 +844,8 @@ bool GLFbPC::setupGLObjects()
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mState.width, mState.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
 	mOsdFull = true;
+	const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+	mUnpackRow = ext && strstr(ext, "GL_EXT_unpack_subimage");
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -1547,19 +1549,33 @@ void GLFbPC::render()
 		if (!mState.blit.exchange(false) && !reinit)
 			return;
 
-		/* neutrino blits four times a second whether anything has changed
-		 * or not; each swap is a flip of the window's plane, and the video
-		 * flip that follows has to wait a frame for it */
+		/* each swap is a flip of the window's plane, and the video flip
+		 * that follows has to wait a frame for it: a blit that changed
+		 * nothing is left out */
 		int box[4];
-		uint64_t sum = osdScan(box);
-		if (sum == mOsdSum && !reinit && !mPlaneRedraw)
-			return;
-		mOsdSum = sum;
+		const bool known = takeDamage(box) && !reinit && !mPlaneRedraw;
+		if (known)
+		{
+			if (box[2] <= box[0] || box[3] <= box[1])
+				return;
+			/* the sum is not kept up to date meanwhile */
+			mOsdSum = 0;
+		}
+		else
+		{
+			uint64_t sum = osdScan(box);
+			if (sum == mOsdSum && !reinit && !mPlaneRedraw)
+				return;
+			mOsdSum = sum;
+		}
 		if (mPlaneRedraw)
 			mPlaneRedraw--;
 
 		/* the window: transparent where nothing but the video is */
-		bltOSDBuffer(box);
+		if (known)
+			bltOSDDamage(box);
+		else
+			bltOSDBuffer(box);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(mViewX, mViewY, *mX, *mY);
 		glClearColor(0.0, 0.0, 0.0, 0.0);
@@ -1665,7 +1681,14 @@ void GLFbPC::render()
 	{
 		/* only blit manually after fb->blit(), this helps to find missed blit() calls */
 		hal_debug("GLFB::%s blit!\n", __func__);
-		bltOSDBuffer(); /* OSD */
+		int rect[4];
+		if (takeDamage(rect))
+		{
+			mOsdSum = 0;
+			bltOSDDamage(rect);
+		}
+		else
+			bltOSDBuffer(); /* OSD */
 	}
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2491,10 +2514,60 @@ void GLFbPC::bltOSDBuffer(const int *box)
 	memcpy(mOsdBox, box, sizeof(mOsdBox));
 	if (y1 <= y0)
 		return;
+	uploadOSD(0, y0, mOsdW, y1);
+}
+
+/* The part of the buffer in x0, y0 to x1, y1 into the texture. GLES2 takes
+ * whole rows only, GL_EXT_unpack_subimage a part of them. */
+void GLFbPC::uploadOSD(int x0, int y0, int x1, int y1)
+{
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
-	/* GLES2 has no GL_UNPACK_ROW_LENGTH, so whole rows */
-	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y0, mOsdW, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE,
-			osd_buf->data() + (size_t)y0 * mOsdW * 4);
+	if (!mUnpackRow)
+	{
+		x0 = 0;
+		x1 = mOsdW;
+	}
+	else
+		glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, mOsdW);
+	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE,
+			osd_buf->data() + ((size_t)y0 * mOsdW + x0) * 4);
+	if (mUnpackRow)
+		glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, 0);
+}
+
+/* What blit() was told has changed since the last call; false when that is
+ * not known and the whole buffer has to be looked at */
+bool GLFbPC::takeDamage(int rect[4])
+{
+	std::lock_guard<std::mutex> lock(mDamageLock);
+	const bool known = !mDamageAll && !mOsdFull;
+	memcpy(rect, mDamage, sizeof(mDamage));
+	memset(mDamage, 0, sizeof(mDamage));
+	mDamageAll = false;
+	return known;
+}
+
+/* Only the part that has changed goes into the texture; what the OSD shows
+ * grows by it, and shrinks again at the next blit that scans. */
+void GLFbPC::bltOSDDamage(const int *rect)
+{
+	const int x0 = std::max(rect[0], 0), y0 = std::max(rect[1], 0);
+	const int x1 = std::min(rect[2], mOsdW), y1 = std::min(rect[3], mOsdH);
+	if (x1 <= x0 || y1 <= y0)
+		return;
+	uploadOSD(x0, y0, x1, y1);
+	if (mOsdBox[2] <= mOsdBox[0] || mOsdBox[3] <= mOsdBox[1])
+	{
+		mOsdBox[0] = x0;
+		mOsdBox[1] = y0;
+		mOsdBox[2] = x1;
+		mOsdBox[3] = y1;
+		return;
+	}
+	mOsdBox[0] = std::min(mOsdBox[0], x0);
+	mOsdBox[1] = std::min(mOsdBox[1], y0);
+	mOsdBox[2] = std::max(mOsdBox[2], x1);
+	mOsdBox[3] = std::max(mOsdBox[3], y1);
 }
 
 /* One pass over the OSD. box: where it shows anything at all - nothing else

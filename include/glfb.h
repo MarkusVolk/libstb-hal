@@ -32,7 +32,9 @@ class GLFramebuffer : public OpenThreads::Thread
 		GLFramebuffer(int x, int y);
 		~GLFramebuffer();
 		std::vector<unsigned char> *getOSDBuffer() { return &osd_buf; } /* pointer to OSD bounce buffer */
-		void blit();
+		/* the OSD buffer has changed; rect is { x0, y0, x1, y1 } of the part
+		 * that has, in OSD pixels, NULL when that is not known */
+		void blit(const int *rect = NULL);
 		fb_var_screeninfo getScreenInfo() { return si; }
 		/* another size for the OSD, up to 1920x1080; the buffer stays where it is */
 		bool setOSDResolution(int x, int y);
