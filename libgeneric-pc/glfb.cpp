@@ -351,7 +351,6 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mContext = NULL;
 	mPlaneReq = NULL;
 	mPlaneFbo = mPlaneTex = 0;
-	mPlaneFboW = mPlaneFboH = 0;
 	mModeW = mModeH = 0;
 	mOsdSum = 0;
 	mPlaneRedraw = 1;
@@ -663,7 +662,6 @@ void GLFbPC::releaseDisplay()
 	if (mPlaneTex)
 		glDeleteTextures(1, &mPlaneTex);
 	mPlaneFbo = mPlaneTex = 0;
-	mPlaneFboW = mPlaneFboH = 0;
 	mPlaneOK = false;
 	mOnPlane = false;
 	mDrmFd = -1;
@@ -2228,19 +2226,18 @@ bool GLFbPC::setupPlane(void *params)
 bool GLFbPC::renderPlane(cMpvEngine *engine)
 {
 	int w = mWinW > 0 ? mWinW : 1, h = mWinH > 0 ? mWinH : 1;
-	if (!mPlaneFbo || w != mPlaneFboW || h != mPlaneFboH)
+	/* mpv clears the target on every frame although nothing of it is shown;
+	 * a window-sized one cost a full-screen GPU job with each OSD swap */
+	if (!mPlaneFbo)
 	{
-		if (!mPlaneFbo)
-			glGenFramebuffers(1, &mPlaneFbo);
-		if (!mPlaneTex)
-			glGenTextures(1, &mPlaneTex);
+		unsigned char px[4] = { 0, 0, 0, 0 };
+		glGenFramebuffers(1, &mPlaneFbo);
+		glGenTextures(1, &mPlaneTex);
 		glBindTexture(GL_TEXTURE_2D, mPlaneTex);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
 		glBindFramebuffer(GL_FRAMEBUFFER, mPlaneFbo);
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mPlaneTex, 0);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
-		mPlaneFboW = w;
-		mPlaneFboH = h;
 	}
 	planeMargins(engine);
 

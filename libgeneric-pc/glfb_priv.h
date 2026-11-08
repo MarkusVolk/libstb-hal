@@ -215,10 +215,8 @@ class GLFbPC
 		bool mPlatformInput; /* the platform reads the remote, SDL's keys stay unused */
 		int mDrmFd;
 		struct _drmModeAtomicReq *mPlaneReq; /* mpv adds the plane's properties here */
-		GLuint mPlaneFbo; /* mpv wants a target, only its size matters */
+		GLuint mPlaneFbo; /* mpv wants a target, only the size it is told matters */
 		GLuint mPlaneTex;
-		int mPlaneFboW;
-		int mPlaneFboH;
 		int mModeW; /* the display mode, which a scaled window is smaller than */
 		int mModeH;
 		double mMargins[4];
