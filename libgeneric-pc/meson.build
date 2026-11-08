@@ -51,6 +51,9 @@ if get_option('webos').enabled()
 else
 	generic_sources += 'platform.cpp'
 endif
+if have_widevine
+	generic_sources += 'cenc_stream.cpp'
+endif
 
 libgeneric = static_library('generic',
 	generic_sources,

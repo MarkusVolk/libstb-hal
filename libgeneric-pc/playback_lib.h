@@ -37,6 +37,12 @@ class cPlayback
 		off64_t last_size;
 		int init_jump;
 		int abort_gen;	/* the engine's abort generation at Open() */
+		/* a stream with Widevine: the license for the next Start(), and
+		 * the cenc:// address mpv plays it under */
+		std::string drm_license_url;
+		std::string drm_license_headers;
+		std::string drm_certificate_url;
+		std::string cenc_url;
 		std::string extractParam(const std::string &hdrs, const std::string &paramName);
 		void parseHeaders(const std::string &headers, std::vector<std::string> &fields, std::string &userAgent);
 		bool Stop(void);
@@ -56,6 +62,11 @@ class cPlayback
 		void Close(void);
 		bool Start(char *filename, int vpid, int vtype, int apid, int ac3, int duration, std::string headers = "", std::string filename2 = "");
 		bool Start(std::string filename, std::string headers = "", std::string filename2 = "");
+		/* the next Start() plays a DASH manifest with Widevine, the license
+		 * from license_url (headers as "Name: value" lines); false
+		 * without Widevine in this build */
+		bool SetDrm(const std::string &license_url, const std::string &license_headers = "",
+			    const std::string &certificate_url = "");
 		bool SetAPid(int pid, bool ac3 = false);
 		bool SetVPid(int /*pid*/) { return true; }
 		bool SetSubtitlePid(int pid);

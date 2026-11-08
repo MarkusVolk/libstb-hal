@@ -45,6 +45,9 @@ extern "C" {
 #include "video_lib.h"
 #include "audio_lib.h"
 #include "hal_debug.h"
+#if HAVE_WIDEVINE
+#include "cenc_stream.h"
+#endif
 
 extern cVideo *videoDecoder;
 extern cAudio *audioDecoder;
@@ -450,6 +453,9 @@ cMpvEngine::cMpvEngine()
 	r = mpv_stream_cb_add_ro(h, LIVE_PROTOCOL, this, live_open);
 	if (r < 0)
 		hal_info("%s: no live TV, mpv_stream_cb_add_ro: %s\n", __func__, mpv_error_string(r));
+#if HAVE_WIDEVINE
+	cenc::registerProtocol(h);
+#endif
 	mpv = h;
 	hal_info("%s: libmpv %s\n", __func__, mpv_get_property_string(h, "mpv-version") ? : "");
 	start();

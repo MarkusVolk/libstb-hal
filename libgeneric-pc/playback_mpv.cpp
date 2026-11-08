@@ -31,6 +31,9 @@
 #include "hal_debug.h"
 #include "hw_player.h"
 #include "platform.h"
+#if HAVE_WIDEVINE
+#include "cenc_stream.h"
+#endif
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_PLAYBACK, this, args)
@@ -80,6 +83,10 @@ bool cPlayback::Open(playmode_t PlayMode)
 	last_size = 0;
 	init_jump = -1;
 	abort_gen = engine ? engine->abortGeneration() : 0;
+	drm_license_url.clear();
+	drm_license_headers.clear();
+	drm_certificate_url.clear();
+	cenc_url.clear();
 	if (hw)
 		hw->reset();
 	return engine != NULL;
@@ -157,6 +164,22 @@ void cPlayback::parseHeaders(const std::string &headers, std::vector<std::string
 	}
 }
 
+bool cPlayback::SetDrm(const std::string &license_url, const std::string &license_headers,
+		       const std::string &certificate_url)
+{
+#if HAVE_WIDEVINE
+	drm_license_url = license_url;
+	drm_license_headers = license_headers;
+	drm_certificate_url = certificate_url;
+	return true;
+#else
+	(void)license_url;
+	(void)license_headers;
+	(void)certificate_url;
+	return false;
+#endif
+}
+
 bool cPlayback::Start(std::string filename, std::string headers, std::string filename2)
 {
 	return Start((char *)filename.c_str(), 0, 0, 0, 0, 0, headers, filename2);
@@ -209,6 +232,29 @@ bool cPlayback::Start(char *filename, int /*vpid*/, int /*vtype*/, int apid, int
 
 	if (hwActive)
 		Stop();
+#if HAVE_WIDEVINE
+	/* the platform's decoder takes no protected stream, mpv gets it
+	 * decrypted from cenc:// */
+	if (!drm_license_url.empty())
+	{
+		cCencParams p;
+		p.manifest = url;
+		p.headers = fields;
+		p.user_agent = userAgent;
+		p.license_url = drm_license_url;
+		p.license_headers = drm_license_headers;
+		p.certificate_url = drm_certificate_url;
+		p.start_ms = init_jump > 0 ? init_jump : 0;
+		init_jump = -1;
+		drm_license_url.clear();
+		cenc_url = cenc::add(p);
+		playing = engine->load(cenc_url, std::vector<std::string>(), "", "", 0, abort_gen);
+		first = true;
+		nPlaybackSpeed = 0;
+		return playing;
+	}
+#endif
+	cenc_url.clear();
 	/* the platform's decoder first; what it cannot take goes on through mpv */
 	if (hw)
 	{
@@ -486,6 +532,10 @@ bool cPlayback::GetPosition(int &position, int &duration, bool isWebChannel)
 		duration = (int)(dur * 1000);
 	else if (pm != PLAYMODE_TS || fn_ts.empty())
 		duration = 0;
+#if HAVE_WIDEVINE
+	if (!cenc_url.empty() && duration <= 0)
+		duration = (int)cenc::durationMs(cenc_url);
+#endif
 
 	if (engine->eofReached())
 	{
@@ -521,6 +571,21 @@ bool cPlayback::SetPosition(int position, bool absolute)
 		init_jump = absolute ? position : -1;
 		return false;
 	}
+#if HAVE_WIDEVINE
+	/* mpv cannot seek in what cenc:// hands it; the stream starts anew
+	 * at the position */
+	cCencParams p;
+	if (!cenc_url.empty() && cenc::params(cenc_url, p))
+	{
+		int pos = 0, dur = 0;
+		if (!absolute && GetPosition(pos, dur))
+			position += pos;
+		p.start_ms = position > 0 ? position : 0;
+		cenc_url = cenc::add(p);
+		playing = engine->load(cenc_url, std::vector<std::string>(), "", "", 0, abort_gen);
+		return playing;
+	}
+#endif
 	char buf[32];
 	snprintf(buf, sizeof(buf), "%.3f", position / 1000.0);
 	const char *cmd[] = { "seek", buf, absolute ? "absolute" : "relative", NULL };

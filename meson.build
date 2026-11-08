@@ -56,6 +56,9 @@ if git.found()
 	endif
 endif
 
+curl_dep = dependency('libcurl', required : get_option('widevine'))
+have_widevine = curl_dep.found()
+
 conf = configuration_data()
 conf.set('_GNU_SOURCE', 1)
 foreach define : box_defines
@@ -63,6 +66,7 @@ foreach define : box_defines
 endforeach
 conf.set('ENABLE_FLV2MPEG4', get_option('flv2mpeg4') ? 1 : false)
 conf.set('DEBUG', get_option('debug') ? 1 : false)
+conf.set('HAVE_WIDEVINE', have_widevine ? 1 : false)
 conf.set_quoted('NEUTRINO_MPV_CONF', get_option('prefix') / get_option('sysconfdir') / 'neutrino/mpv.conf')
 conf.set_quoted('NEUTRINO_WIDEVINE_DIR', get_option('prefix') / get_option('sysconfdir') / 'neutrino/config/widevine')
 conf.set_quoted('PACKAGE_NAME', 'Tuxbox-libstb-hal')
@@ -89,8 +93,6 @@ ffmpeg_deps = [
 	dependency('libswresample'),
 	dependency('libswscale'),
 ]
-curl_dep = dependency('libcurl', required : get_option('widevine'))
-have_widevine = curl_dep.found()
 
 hal_parts = []
 subdir('common')
