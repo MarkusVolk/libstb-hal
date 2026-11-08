@@ -309,16 +309,17 @@ class GLFbPC
 			std::atomic<bool> blit; /* set by any thread, taken by the GL thread */
 			GLuint osdtex; /* holds the OSD texture */
 			GLuint displaytex; /* holds the display texture */
-			GLuint program; /* the GLES2 shader program */
+			GLuint program[2]; /* the shader programs: [1] swaps BGRA, [0] does not */
+			int prog; /* the one in use, -1 when another may be */
 			GLint a_pos; /* vertex attribute: position */
 			GLint a_tex; /* vertex attribute: texture coordinate */
-			GLint u_scale; /* uniform: zoom / aspect scaling */
-			GLint u_xproj; /* uniform: orthographic x scaling */
-			GLint u_bgra; /* uniform: 1 swizzles the BGRA CPU buffers, 0 for the mpv texture */
+			GLint u_scale[2]; /* uniform: zoom / aspect scaling */
+			GLint u_xproj[2]; /* uniform: orthographic x scaling */
 			float xproj;
 		} mState;
 
 		void bltOSDBuffer(const int *box = NULL); /* box: what osdScan() found, NULL scans */
+		void useProgram(bool swap);
 		void bltDisplayBuffer();
 };
 #endif

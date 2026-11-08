@@ -776,17 +776,25 @@ static const char *vertex_shader =
 	"	v_tex = a_tex;\n"
 	"}\n";
 
-/* the OSD and video buffers are BGRA, the texture is uploaded as RGBA */
-static const char *fragment_shader =
+/* the OSD and video buffers are BGRA, the texture is uploaded as RGBA: one
+ * program swaps the channels, the other leaves them as they are. A mix() of
+ * both in one program costs a Mali-450 twice the time per pixel. */
+static const char *fragment_shader[2] = {
 	"precision mediump float;\n"
 	"uniform sampler2D u_tex;\n"
-	"uniform float u_bgra;\n"
 	"varying vec2 v_tex;\n"
 	"void main()\n"
 	"{\n"
-	"	vec4 c = texture2D(u_tex, v_tex);\n"
-	"	gl_FragColor = mix(c, c.bgra, u_bgra);\n"
-	"}\n";
+	"	gl_FragColor = texture2D(u_tex, v_tex);\n"
+	"}\n",
+	"precision mediump float;\n"
+	"uniform sampler2D u_tex;\n"
+	"varying vec2 v_tex;\n"
+	"void main()\n"
+	"{\n"
+	"	gl_FragColor = texture2D(u_tex, v_tex).bgra;\n"
+	"}\n",
+};
 
 static GLuint compileShader(GLenum type, const char *source)
 {
@@ -808,34 +816,41 @@ static GLuint compileShader(GLenum type, const char *source)
 
 bool GLFbPC::setupGLObjects()
 {
-	GLuint vs = compileShader(GL_VERTEX_SHADER, vertex_shader);
-	GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragment_shader);
-	if (!vs || !fs)
-		return false;
-	mState.program = glCreateProgram();
-	glAttachShader(mState.program, vs);
-	glAttachShader(mState.program, fs);
-	glLinkProgram(mState.program);
-	glDeleteShader(vs);
-	glDeleteShader(fs);
-	GLint ok = GL_FALSE;
-	glGetProgramiv(mState.program, GL_LINK_STATUS, &ok);
-	if (!ok)
+	/* both programs take the vertices at the same attribute locations */
+	mState.a_pos = 0;
+	mState.a_tex = 1;
+	for (int i = 0; i < 2; i++)
 	{
-		char log[1024];
-		glGetProgramInfoLog(mState.program, sizeof(log), NULL, log);
-		hal_info("GLFB::%s: program link failed: %s\n", __func__, log);
-		return false;
+		GLuint vs = compileShader(GL_VERTEX_SHADER, vertex_shader);
+		GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragment_shader[i]);
+		if (!vs || !fs)
+			return false;
+		GLuint p = glCreateProgram();
+		mState.program[i] = p;
+		glAttachShader(p, vs);
+		glAttachShader(p, fs);
+		glBindAttribLocation(p, mState.a_pos, "a_pos");
+		glBindAttribLocation(p, mState.a_tex, "a_tex");
+		glLinkProgram(p);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		GLint ok = GL_FALSE;
+		glGetProgramiv(p, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			char log[1024];
+			glGetProgramInfoLog(p, sizeof(log), NULL, log);
+			hal_info("GLFB::%s: program link failed: %s\n", __func__, log);
+			return false;
+		}
+		mState.u_scale[i] = glGetUniformLocation(p, "u_scale");
+		mState.u_xproj[i] = glGetUniformLocation(p, "u_xproj");
+		glUseProgram(p);
+		glUniform1i(glGetUniformLocation(p, "u_tex"), 0);
 	}
-	mState.a_pos = glGetAttribLocation(mState.program, "a_pos");
-	mState.a_tex = glGetAttribLocation(mState.program, "a_tex");
-	mState.u_scale = glGetUniformLocation(mState.program, "u_scale");
-	mState.u_xproj = glGetUniformLocation(mState.program, "u_xproj");
-	mState.u_bgra = glGetUniformLocation(mState.program, "u_bgra");
 	mState.xproj = 1.0;
-	glUseProgram(mState.program);
-	glUniform1f(mState.u_bgra, 1.0);
-	glUniform1i(glGetUniformLocation(mState.program, "u_tex"), 0);
+	mState.prog = -1;
+	useProgram(true);
 	glActiveTexture(GL_TEXTURE0);
 
 	/* non power of two textures need clamping and no mipmaps in GLES2 */
@@ -875,7 +890,8 @@ void GLFbPC::releaseGLObjects()
 	dropSource();
 	glDeleteTextures(1, &mState.osdtex);
 	glDeleteTextures(1, &mState.displaytex);
-	glDeleteProgram(mState.program);
+	glDeleteProgram(mState.program[0]);
+	glDeleteProgram(mState.program[1]);
 }
 
 
@@ -1784,7 +1800,7 @@ void GLFbPC::render()
 		if (video || still)
 		{
 			glDisable(GL_BLEND);
-			glUniform1f(mState.u_bgra, video ? 0.0 : 1.0);
+			useProgram(!video);
 			glBindTexture(GL_TEXTURE_2D, video ? mVideoTex : mState.displaytex);
 			drawSquare(zoom, xscale);
 			glEnable(GL_BLEND);
@@ -2403,7 +2419,8 @@ void GLFbPC::renderVideo(const cMpvEngine::VideoParams &vp)
 void GLFbPC::restoreGLState()
 {
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
-	glUseProgram(mState.program);
+	mState.prog = -1;
+	useProgram(true);
 	glActiveTexture(GL_TEXTURE0);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
@@ -2419,6 +2436,16 @@ void GLFbPC::restoreGLState()
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 	glClearColor(0.0, 0.0, 0.0, 1.0);
+}
+
+/* swap: the one for the BGRA buffers of the CPU, else the one that leaves the
+ * colours as they are */
+void GLFbPC::useProgram(bool swap)
+{
+	if (mState.prog == (int)swap)
+		return;
+	mState.prog = swap;
+	glUseProgram(mState.program[swap]);
 }
 
 void GLFbPC::drawSquare(float size, float x_factor)
@@ -2467,8 +2494,8 @@ void GLFbPC::drawSquare(float size, float x_factor)
 	else
 		x_factor = 1.0; /* OSD */
 
-	glUniform2f(mState.u_scale, size * x_factor, size);
-	glUniform1f(mState.u_xproj, mState.xproj);
+	glUniform2f(mState.u_scale[mState.prog], size * x_factor, size);
+	glUniform1f(mState.u_xproj[mState.prog], mState.xproj);
 	glEnableVertexAttribArray(mState.a_pos);
 	glEnableVertexAttribArray(mState.a_tex);
 	glVertexAttribPointer(mState.a_pos, 2, GL_FLOAT, GL_FALSE, 0, vertices);
@@ -2624,7 +2651,7 @@ void GLFbPC::drawOSD()
 		/* the other program's picture, which has its colours multiplied
 		 * with its alpha already */
 		glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-		glUniform1f(mState.u_bgra, 0.0);
+		useProgram(false);
 		glBindTexture(GL_TEXTURE_2D, mSourceTex);
 		drawSquare(1.0, -100);
 		glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
@@ -2648,7 +2675,7 @@ void GLFbPC::drawOSD()
 		sy0 = 0;
 	glEnable(GL_SCISSOR_TEST);
 	glScissor(sx0, sy0, sx1 - sx0, sy1 - sy0);
-	glUniform1f(mState.u_bgra, 1.0);
+	useProgram(true);
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 	drawSquare(1.0, -100);
 	glDisable(GL_SCISSOR_TEST);
