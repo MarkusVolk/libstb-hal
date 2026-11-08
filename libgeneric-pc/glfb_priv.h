@@ -268,6 +268,14 @@ class GLFbPC
 		void *(*mEglCreateImage)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
 		EGLBoolean (*mEglDestroyImage)(EGLDisplay, EGLImageKHR);
 		void (*mGlImageTarget)(GLenum, void *);
+		EGLBoolean (*mEglQuerySurface)(EGLDisplay, EGLSurface, EGLint, EGLint *);
+		EGLSurface (*mEglCurrentSurface)(EGLint);
+		EGLBoolean (*mEglSetDamageRegion)(EGLDisplay, EGLSurface, EGLint *, EGLint);
+		int mDrawn[3][4]; /* in the window: what the last frames drew, newest first */
+		int mClip[4]; /* while mClipOn: the part of the window that is drawn anew */
+		bool mClipOn = false;
+		void osdToWindow(const int box[4], int win[4]);
+		bool damageRegion(const int *box, int clip[4]);
 		uint64_t osdScan(int box[4]); /* one pass: where the OSD shows anything, and a sum of it */
 		uint64_t mOsdSum; /* of the OSD that is on the window's plane */
 		int mPlaneRedraw; /* swaps the window needs although the OSD did not change */

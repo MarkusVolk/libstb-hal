@@ -879,6 +879,19 @@ bool GLFbPC::setupGLObjects()
 	mGlImageTarget = (void (*)(GLenum, void *))SDL_GL_GetProcAddress("glEGLImageTargetTexture2DOES");
 	mSourceOK = SDL_EGL_GetCurrentDisplay() && mEglCreateImage && mEglDestroyImage && mGlImageTarget &&
 		    SDL_GL_ExtensionSupported("GL_OES_EGL_image");
+
+	/* for drawing only what has changed: how old the content of the buffer
+	 * is that the next frame goes into, and telling EGL what of it is new */
+	mEglQuerySurface = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLint, EGLint *))SDL_EGL_GetProcAddress("eglQuerySurface");
+	mEglCurrentSurface = (EGLSurface (*)(EGLint))SDL_EGL_GetProcAddress("eglGetCurrentSurface");
+	mEglSetDamageRegion = NULL;
+	EGLDisplay dpy = SDL_EGL_GetCurrentDisplay();
+	const char *(*query)(EGLDisplay, EGLint) = (const char *(*)(EGLDisplay, EGLint))SDL_EGL_GetProcAddress("eglQueryString");
+	const char *eglext = dpy && query ? query(dpy, EGL_EXTENSIONS) : NULL;
+	if (mEglQuerySurface && mEglCurrentSurface && eglext &&
+	    strstr(eglext, "EGL_EXT_buffer_age") && strstr(eglext, "EGL_KHR_partial_update"))
+		mEglSetDamageRegion = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLint *, EGLint))SDL_EGL_GetProcAddress("eglSetDamageRegionKHR");
+	memset(mDrawn, 0, sizeof(mDrawn));
 	return true;
 }
 
@@ -1592,10 +1605,21 @@ void GLFbPC::render()
 			bltOSDBuffer(box);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(mViewX, mViewY, *mX, *mY);
+		/* only the part that has changed is drawn anew where the buffer
+		 * still holds the rest from a frame before */
+		mClipOn = damageRegion(known && !mSourceTex ? box : NULL, mClip);
+		if (mClipOn)
+		{
+			glEnable(GL_SCISSOR_TEST);
+			glScissor(mClip[0], mClip[1], mClip[2] - mClip[0], mClip[3] - mClip[1]);
+		}
 		glClearColor(0.0, 0.0, 0.0, 0.0);
 		glClear(GL_COLOR_BUFFER_BIT);
 		glClearColor(0.0, 0.0, 0.0, 1.0);
 		drawOSD();
+		if (mClipOn)
+			glDisable(GL_SCISSOR_TEST);
+		mClipOn = false;
 		SDL_GL_SwapWindow(mWindow);
 		sourceDone();
 		return;
@@ -1807,6 +1831,7 @@ void GLFbPC::render()
 	if (video_full)
 		glViewport(mViewX, mViewY, *mX, *mY);
 	drawOSD();
+	damageRegion(NULL, NULL);
 
 	uint64_t t_draw = SDL_GetTicksNS();
 	SDL_GL_SwapWindow(mWindow);
@@ -2641,6 +2666,63 @@ uint64_t GLFbPC::osdScan(int box[4])
 	return a ^ (b << 1) ^ i;
 }
 
+/* box in OSD pixels to where it is in the window, in GL's coordinates (y up),
+ * with a margin for the linear sampling at its edges */
+void GLFbPC::osdToWindow(const int box[4], int win[4])
+{
+	const float half = *mX / 2.0f;
+	const float u0 = (float)box[0] / mOsdW, u1 = (float)box[2] / mOsdW;
+	const float v0 = (float)box[1] / mOsdH, v1 = (float)box[3] / mOsdH;
+	win[0] = std::max(0, mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u0 - 1.0f))) - 2);
+	win[2] = mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u1 - 1.0f))) + 3;
+	win[1] = std::max(0, mViewY + (int)(*mY * (1.0f - v1)) - 2);
+	win[3] = mViewY + (int)(*mY * (1.0f - v0)) + 3;
+}
+
+/* With buffer age and partial update, the part of the window this frame has
+ * to draw: the OSD box that changed, and what the frames since the buffer
+ * was last drawn into have changed. false when the whole window has to be
+ * drawn, as always without a box. Each frame is remembered either way. */
+bool GLFbPC::damageRegion(const int *box, int clip[4])
+{
+	int win[4] = { 0, 0, 0, 0 };
+	if (box)
+		osdToWindow(box, win);
+	bool ok = false;
+	EGLDisplay dpy = SDL_EGL_GetCurrentDisplay();
+	/* the window's: SDL does not give it out on KMS */
+	EGLSurface surf = mEglCurrentSurface ? mEglCurrentSurface(EGL_DRAW) : NULL;
+	EGLint age = 0;
+	if (box && mEglSetDamageRegion && dpy && surf && mEglQuerySurface(dpy, surf, EGL_BUFFER_AGE_EXT, &age) &&
+	    age >= 1 && age <= (EGLint)(sizeof(mDrawn) / sizeof(mDrawn[0])) + 1)
+	{
+		memcpy(clip, win, sizeof(win));
+		ok = true;
+		for (int i = 0; i < age - 1 && ok; i++)
+		{
+			/* nothing remembered: what the buffer holds is not known */
+			ok = mDrawn[i][2] > mDrawn[i][0];
+			clip[0] = std::min(clip[0], mDrawn[i][0]);
+			clip[1] = std::min(clip[1], mDrawn[i][1]);
+			clip[2] = std::max(clip[2], mDrawn[i][2]);
+			clip[3] = std::max(clip[3], mDrawn[i][3]);
+		}
+		EGLint rect[4] = { clip[0], clip[1], clip[2] - clip[0], clip[3] - clip[1] };
+		ok = ok && mEglSetDamageRegion(dpy, surf, rect, 1);
+	}
+	/* a frame drawn whole counts as the whole window */
+	if (!ok)
+	{
+		win[0] = 0;
+		win[1] = 0;
+		win[2] = mWinW;
+		win[3] = mWinH;
+	}
+	memmove(mDrawn[1], mDrawn[0], sizeof(mDrawn) - sizeof(mDrawn[0]));
+	memcpy(mDrawn[0], win, sizeof(win));
+	return ok;
+}
+
 void GLFbPC::drawOSD()
 {
 	if (mSourceTex)
@@ -2658,20 +2740,20 @@ void GLFbPC::drawOSD()
 		return;
 
 	/* the quad covers the viewport, the scissor keeps the work to the part
-	 * of it that shows something */
-	const float half = *mX / 2.0f;
-	const float u0 = (float)mOsdBox[0] / mOsdW, u1 = (float)mOsdBox[2] / mOsdW;
-	const float v0 = (float)mOsdBox[1] / mOsdH, v1 = (float)mOsdBox[3] / mOsdH;
-	int sx0 = mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u0 - 1.0f))) - 2;
-	int sx1 = mViewX + (int)(half * (1.0f + mState.xproj * (2.0f * u1 - 1.0f))) + 3;
-	int sy0 = mViewY + (int)(*mY * (1.0f - v1)) - 2;
-	int sy1 = mViewY + (int)(*mY * (1.0f - v0)) + 3;
-	if (sx0 < 0)
-		sx0 = 0;
-	if (sy0 < 0)
-		sy0 = 0;
+	 * of it that shows something, and to what is drawn anew */
+	int s[4];
+	osdToWindow(mOsdBox, s);
+	if (mClipOn)
+	{
+		s[0] = std::max(s[0], mClip[0]);
+		s[1] = std::max(s[1], mClip[1]);
+		s[2] = std::min(s[2], mClip[2]);
+		s[3] = std::min(s[3], mClip[3]);
+		if (s[2] <= s[0] || s[3] <= s[1])
+			return;
+	}
 	glEnable(GL_SCISSOR_TEST);
-	glScissor(sx0, sy0, sx1 - sx0, sy1 - sy0);
+	glScissor(s[0], s[1], s[2] - s[0], s[3] - s[1]);
 	useProgram(true);
 	glBindTexture(GL_TEXTURE_2D, mState.osdtex);
 	drawSquare(1.0, -100);
