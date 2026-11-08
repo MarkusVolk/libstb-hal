@@ -13,3 +13,5 @@ option('webos', type : 'feature', value : 'disabled',
 	description : 'Build for LG webOS TVs')
 option('webos_protocols', type : 'string', value : '',
 	description : 'Directory with the protocol descriptions of webos-wayland-extensions')
+option('widevine', type : 'feature', value : 'auto',
+	description : 'Widevine through a CDM put onto the box (needs libcurl)')

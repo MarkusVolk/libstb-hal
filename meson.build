@@ -64,6 +64,7 @@ endforeach
 conf.set('ENABLE_FLV2MPEG4', get_option('flv2mpeg4') ? 1 : false)
 conf.set('DEBUG', get_option('debug') ? 1 : false)
 conf.set_quoted('NEUTRINO_MPV_CONF', get_option('prefix') / get_option('sysconfdir') / 'neutrino/mpv.conf')
+conf.set_quoted('NEUTRINO_WIDEVINE_DIR', get_option('prefix') / get_option('sysconfdir') / 'neutrino/config/widevine')
 conf.set_quoted('PACKAGE_NAME', 'Tuxbox-libstb-hal')
 conf.set_quoted('PACKAGE_VERSION', meson.project_version())
 conf.set_quoted('PACKAGE_STRING', 'Tuxbox-libstb-hal ' + meson.project_version())
@@ -88,6 +89,8 @@ ffmpeg_deps = [
 	dependency('libswresample'),
 	dependency('libswscale'),
 ]
+curl_dep = dependency('libcurl', required : get_option('widevine'))
+have_widevine = curl_dep.found()
 
 hal_parts = []
 subdir('common')
@@ -130,6 +133,7 @@ install_headers(
 	'include/streaminput_ffmpeg.h',
 	'include/version_hal.h',
 	'include/video_hal.h',
+	'include/widevine_hal.h',
 	subdir : 'libstb-hal',
 )
 
@@ -140,10 +144,21 @@ libstb_hal = shared_library('stb-hal',
 	install : true,
 )
 
+if have_widevine
+	executable('widevine-check',
+		'tools/widevine-check.cpp',
+		include_directories : [config_inc, hal_inc],
+		link_with : libstb_hal,
+		install : true,
+	)
+	install_data('tools/neutrino-widevine', install_dir : get_option('bindir'), install_mode : 'rwxr-xr-x')
+endif
+
 pkg = import('pkgconfig')
 pkg.generate(libstb_hal,
 	name : 'libstb-hal',
 	description : 'Hardware abstraction of Neutrino',
 	subdirs : 'libstb-hal',
-	variables : ['boxtype=' + boxtype, 'boxmodel=' + boxmodel, 'boxdefines=' + ','.join(box_defines)],
+	variables : ['boxtype=' + boxtype, 'boxmodel=' + boxmodel, 'boxdefines=' + ','.join(box_defines),
+		'widevine=' + (have_widevine ? 'yes' : 'no')],
 )

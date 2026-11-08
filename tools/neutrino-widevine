@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""neutrino-widevine - puts the Widevine CDM where Neutrino loads it from.
+
+  neutrino-widevine status         installed version, whether it loads, the directory
+  neutrino-widevine latest         the version Google offers for this machine
+  neutrino-widevine install        the latest from Google's component updater
+  neutrino-widevine install PATH   a CDM from a directory, a .crx3 or a .zip
+  neutrino-widevine update         install only when Google offers a newer version
+  neutrino-widevine remove
+
+Google does not allow the CDM in an image, so it is fetched on the box, as
+Kodi's inputstreamhelper does it. The directory is the one widevine-check
+names; NEUTRINO_WIDEVINE_DIR overrides it for both.
+
+Copyright (C) 2026 Markus Volk, License: GPL-2.0-or-later. The update request
+follows script.module.inputstreamhelper (MIT)."""
+
+import hashlib
+import io
+import json
+import os
+import platform
+import random
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+
+UPDATE_URL = "https://update.googleapis.com/service/update2/json"
+APP_ID = "oimompecagnajdejgnnjijobebaeigek"
+LIBRARY = "libwidevinecdm.so"
+DEFAULT_DIR = "/etc/neutrino/config/widevine"
+
+
+def fail(text):
+    print(text, file=sys.stderr)
+    sys.exit(1)
+
+
+def directory():
+    try:
+        out = subprocess.run(["widevine-check", "--dir"], capture_output=True, text=True, timeout=10).stdout
+        lines = [l for l in out.splitlines() if l.startswith("/")]
+        if lines:
+            return lines[-1]
+    except OSError:
+        pass
+    return os.environ.get("NEUTRINO_WIDEVINE_DIR") or DEFAULT_DIR
+
+
+def arch():
+    """Google's name for the CPU, if it offers a Linux CDM for it"""
+    machine = platform.machine()
+    bits64 = struct.calcsize("P") == 8
+    if machine in ("x86_64", "amd64") and bits64:
+        return "x64"
+    if machine in ("aarch64", "arm64") and bits64:
+        return "arm64"
+    return None
+
+
+def check(path):
+    """(True, version) when the CDM in path loads, else (False, reason)"""
+    env = dict(os.environ, NEUTRINO_WIDEVINE_DIR=path)
+    try:
+        r = subprocess.run(["widevine-check"], capture_output=True, text=True, env=env, timeout=30)
+    except OSError as e:
+        return False, "widevine-check: %s" % e
+    for line in r.stdout.splitlines():
+        if line.startswith("version "):
+            return r.returncode == 0, line[8:]
+    return False, (r.stderr.strip() or "widevine-check failed").splitlines()[-1]
+
+
+def manifest_version(path):
+    try:
+        with open(os.path.join(path, "manifest.json")) as f:
+            return json.load(f).get("version")
+    except (OSError, ValueError):
+        return None
+
+
+def latest():
+    """version, address, size and sha256 of the newest CDM Google offers"""
+    a = arch()
+    if not a:
+        fail("Google offers no Linux CDM for %s (%d bit userspace)" % (platform.machine(), struct.calcsize("P") * 8))
+    request = {"request": {
+        "@os": "", "@updater": "", "acceptformat": "crx3,download,puff,run,xz,zucc",
+        "apps": [{"appid": APP_ID, "installsource": "ondemand", "updatecheck": {}, "version": "1.4.9.1088"}],
+        "dedup": "cr", "ismachine": False, "arch": a, "os": {"arch": a, "platform": "Linux"},
+        "protocol": "4.0", "updaterversion": "151.0.7922.173"}}
+    req = urllib.request.Request(UPDATE_URL, data=json.dumps(request).encode(),
+                                 headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        answer = json.loads(r.read().decode().lstrip(")]}'"))
+    check_ = answer["response"]["apps"][0]["updatecheck"]
+    for op in check_.get("pipelines", [{}])[0].get("operations", []):
+        if op.get("type") == "download" and op.get("urls"):
+            urls = [u["url"] for u in op["urls"]]
+            https = [u for u in urls if u.startswith("https:")]
+            return {"version": check_.get("nextversion"), "url": random.choice(https or urls),
+                    "size": int(op.get("size", 0)), "sha256": op.get("out", {}).get("sha256")}
+    fail("Google's answer names no download")
+
+
+def download(info, dest):
+    h = hashlib.sha256()
+    done = 0
+    with urllib.request.urlopen(urllib.request.Request(info["url"], headers={"User-Agent": "Mozilla/5.0"}),
+                                timeout=60) as r, open(dest, "wb") as f:
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            h.update(chunk)
+            done += len(chunk)
+    if info["size"] and done != info["size"]:
+        fail("the download has %d of %d bytes" % (done, info["size"]))
+    if info["sha256"] and h.hexdigest() != info["sha256"]:
+        fail("the download does not match its checksum")
+
+
+def unpack(package, dest):
+    """the CDM, its manifest and licence from a .crx3 (a zip behind a header) or a .zip"""
+    with open(package, "rb") as f:
+        data = f.read()
+    if data[:4] == b"Cr24":
+        header = struct.unpack("<I", data[8:12])[0]
+        data = data[12 + header:]
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        names = z.namelist()
+        lib = [n for n in names if n.endswith("/" + LIBRARY) or n == LIBRARY]
+        if not lib:
+            fail("%s holds no %s" % (package, LIBRARY))
+        for name, target in ((lib[0], LIBRARY), ("manifest.json", "manifest.json"), ("LICENSE", "LICENSE")):
+            if name in names:
+                with z.open(name) as src, open(os.path.join(dest, target), "wb") as out:
+                    shutil.copyfileobj(src, out)
+    os.chmod(os.path.join(dest, LIBRARY), 0o755)
+
+
+def install_from(staged, target):
+    """the staged CDM replaces the installed one once it is shown to load"""
+    ok, result = check(staged)
+    if not ok:
+        fail("the new CDM does not load: %s" % result)
+    old = target + ".old"
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.isdir(target):
+        os.rename(target, old)
+    os.rename(staged, target)
+    shutil.rmtree(old, ignore_errors=True)
+    print("installed %s in %s" % (result, target))
+
+
+def install(source=None):
+    target = directory()
+    parent = os.path.dirname(target)
+    os.makedirs(parent, exist_ok=True)
+    staged = tempfile.mkdtemp(prefix=".widevine-", dir=parent)
+    os.chmod(staged, 0o755)
+    try:
+        if source and os.path.isdir(source):
+            if not os.path.exists(os.path.join(source, LIBRARY)):
+                fail("%s holds no %s" % (source, LIBRARY))
+            for name in (LIBRARY, "manifest.json", "LICENSE"):
+                if os.path.exists(os.path.join(source, name)):
+                    shutil.copy2(os.path.join(source, name), staged)
+        elif source and os.path.isfile(source):
+            unpack(source, staged)
+        else:
+            info = latest()
+            print("downloading %s (%d MB)" % (info["version"], info["size"] >> 20), flush=True)
+            package = os.path.join(staged, "cdm.crx3")
+            download(info, package)
+            unpack(package, staged)
+            os.remove(package)
+        install_from(staged, target)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+
+def status():
+    path = directory()
+    print("directory %s" % path)
+    if not os.path.exists(os.path.join(path, LIBRARY)):
+        print("not installed")
+        return 1
+    ok, result = check(path)
+    print("version %s" % (manifest_version(path) or "unknown"))
+    print("loads %s" % ("yes" if ok else "no: " + result))
+    return 0 if ok else 1
+
+
+def main(argv):
+    cmd = argv[0] if argv else "status"
+    if cmd == "status":
+        return status()
+    if cmd == "latest":
+        info = latest()
+        print("latest %s" % info["version"])
+        return 0
+    if cmd == "install":
+        install(argv[1] if len(argv) > 1 else None)
+        return 0
+    if cmd == "update":
+        info = latest()
+        have = manifest_version(directory())
+        if have and [int(x) for x in have.split(".")] >= [int(x) for x in info["version"].split(".")]:
+            print("up to date %s" % have)
+            return 0
+        install()
+        return 0
+    if cmd == "remove":
+        path = directory()
+        shutil.rmtree(path, ignore_errors=True)
+        print("removed %s" % path)
+        return 0
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as e:
+        fail("%s: %s" % (type(e).__name__, e))
