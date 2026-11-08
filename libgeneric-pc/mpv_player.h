@@ -138,6 +138,8 @@ class cMpvEngine : public OpenThreads::Thread
 
 		/* cached by the event thread, read by the GL thread */
 		VideoParams getVideoParams();
+		/* the event thread calls wake(ctx) when the video comes or goes */
+		void setVideoWake(void (*wake)(void *), void *ctx);
 		/* The GL thread brackets every mpv_render_context_render() with these.
 		 * renderBegin() says whether the frame may be drawn: not while the file
 		 * it belongs to is being replaced, its decoder is torn down by then and
@@ -197,6 +199,8 @@ class cMpvEngine : public OpenThreads::Thread
 		int mLiveClockTicks;
 		double mTimePos;
 		bool mNoDeinterlace;
+		void (*mVideoWake)(void *);
+		void *mVideoWakeCtx;
 
 		static cMpvEngine *instance;
 		static bool instanceGone; /* shut down, failed or HAL_NOMPV: getInstance() stays NULL */

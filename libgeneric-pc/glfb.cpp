@@ -1508,7 +1508,26 @@ void GLFbPC::render()
 	if (engine)
 		vp = engine->getVideoParams();
 	if (!vp.valid)
+	{
 		mVideoValid = false;
+		/* mpv lets go of the last frames of a video, and with them of the
+		 * decoder's buffers that the next video needs, only in a render
+		 * after its output is gone */
+		if (mRender && !(flags & MPV_RENDER_UPDATE_FRAME))
+		{
+			if (engine)
+				engine->renderBegin();
+			int skip = 1;
+			mpv_render_param params[2];
+			params[0].type = MPV_RENDER_PARAM_SKIP_RENDERING;
+			params[0].data = &skip;
+			params[1].type = MPV_RENDER_PARAM_INVALID;
+			params[1].data = NULL;
+			mpv_render_context_render(mRender, params);
+			if (engine)
+				engine->renderEnd();
+		}
+	}
 	mDar = vp.valid ? vp.dar : 0;
 
 	/* The video on the plane below the window: the GPU only draws the OSD,
@@ -2160,6 +2179,7 @@ bool GLFbPC::setupRender()
 		return false;
 	}
 	mpv_render_context_set_update_callback(mRender, renderUpdateCb, this);
+	engine->setVideoWake(renderUpdateCb, this);
 	hal_info("GLFB::%s: libmpv render context ready (%s)\n", __func__, wl ? "wayland display" : x11 ? "x11 display" : drm.render_fd >= 0 ? "drm render node" : "no native display");
 	if (mPlaneOK)
 		hal_info("GLFB::%s: DRM PRIME video goes to the %s plane of CRTC %d, the window is above it\n", __func__, mVideoPlane ? "video" : "primary", drm.crtc_id);

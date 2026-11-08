@@ -395,6 +395,8 @@ cMpvEngine::cMpvEngine()
 	mVideo.dar = 0;
 	mVideo.drmprime = false;
 	mVideo.fps = 0;
+	mVideoWake = NULL;
+	mVideoWakeCtx = NULL;
 	memset(&mLive, 0, sizeof(mLive));
 
 	mpv_handle *h = mpv_create();
@@ -768,7 +770,20 @@ void cMpvEngine::updateVideoParams(mpv_node *node)
 	v.tff = mVideo.tff;
 	if (v.valid != mVideo.valid || v.w != mVideo.w || v.h != mVideo.h)
 		hal_info("%s: video %dx%d%s\n", __func__, v.w, v.h, v.valid ? "" : " (none)");
+	bool came_or_went = v.valid != mVideo.valid;
 	mVideo = v;
+	void (*wake)(void *) = mVideoWake;
+	void *ctx = mVideoWakeCtx;
+	mVideoLock.unlock();
+	if (came_or_went && wake)
+		wake(ctx);
+}
+
+void cMpvEngine::setVideoWake(void (*wake)(void *), void *ctx)
+{
+	mVideoLock.lock();
+	mVideoWake = wake;
+	mVideoWakeCtx = ctx;
 	mVideoLock.unlock();
 }
 
