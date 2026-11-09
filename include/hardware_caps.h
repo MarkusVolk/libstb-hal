@@ -101,7 +101,6 @@ typedef struct hw_caps
 	int multiboot_devicetree; /* the slot is read from the device tree */
 	int can_ar_16_10; /* appended last: keeps the layout of older headers */
 	int media_in_home; /* music, videos and pictures default to the user's home */
-	int can_hisi_avplay; /* live TV through the vendor AVPLAY of the HiSilicon libraries */
 } hw_caps_t;
 
 hw_caps_t *get_hwcaps(void);

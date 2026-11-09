@@ -35,7 +35,6 @@
 #include <linux/dvb/video.h>
 #include <linux/fb.h>
 #include "video_lib.h"
-#include "hisi_live.h"
 #include "audio_lib.h"
 #include "hal_debug.h"
 #include "hdmi_cec.h"
@@ -591,8 +590,6 @@ cVideo::cVideo(int, void *, void *, unsigned int unit)
 
 cVideo::~cVideo(void)
 {
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		h->Close();
 #if 0
 	if (fd >= 0)
 		setAVInput(AUX);
@@ -626,8 +623,6 @@ void cVideo::closeDevice(void)
 {
 	hal_debug("%s\n", __func__);
 	/* the players open the device themselves */
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		h->Hide();
 	/* looks like sometimes close is unhappy about non-empty buffers */
 //	Start();
 	if (fd >= 0)
@@ -658,14 +653,10 @@ int cVideo::setAspectRatio(int aspect, int mode)
 		n = proc_put("/proc/stb/video/aspect", a[aspect], strlen(a[aspect]));
 		if (n < 0)
 			hal_info("%s: proc_put /proc/stb/video/aspect (%m)\n", __func__);
-		if (cHisiLive *h = cHisiLive::forUnit(devnum))
-			h->SetScreenAspect(aspect);
 	}
 
 	if (mode == -1)
 		return 0;
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		h->SetAspectMode(mode);
 #if BOXMODEL_OSMIO4K || BOXMODEL_OSMIO4KPLUS
 	hal_debug("%s: /proc/stb/video/policy2 -> %s\n", __func__, m[mo]);
 	n = proc_put("/proc/stb/video/policy2", m[mo], strlen(m[mo]));
@@ -743,14 +734,7 @@ bool cVideo::LivePause(bool on)
 		HoldPicture(true);
 		int64_t pts = GetPTS();
 		held_pts = pts > 0 ? pts : -1;
-#if BOXMODEL_HISILICON
-		cHisiLive *h = cHisiLive::forUnit(devnum);
-		if (h)
-			h->StopVideo(false);
-		else if (fop(ioctl, VIDEO_FREEZE) < 0)
-#else
 		if (fop(ioctl, VIDEO_STOP, 0) < 0)
-#endif
 		{
 			HoldPicture(false);
 			return false;
@@ -787,17 +771,8 @@ int cVideo::Start(void * /*PcrChannel*/, unsigned short /*PcrPid*/, unsigned sho
 		Stop(1);
 	}
 	playstate = VIDEO_PLAYING;
-	int res;
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		res = h->StartVideo() ? 0 : -1;
-	else
-	{
-		fop(ioctl, VIDEO_SELECT_SOURCE, VIDEO_SOURCE_DEMUX);
-		res = fop(ioctl, VIDEO_PLAY);
-#if BOXMODEL_HISILICON
-		fop(ioctl, VIDEO_CONTINUE);
-#endif
-	}
+	fop(ioctl, VIDEO_SELECT_SOURCE, VIDEO_SOURCE_DEMUX);
+	int res = fop(ioctl, VIDEO_PLAY);
 	if (brightness > -1)
 	{
 		SetControl(VIDEO_CONTROL_BRIGHTNESS, brightness);
@@ -836,22 +811,11 @@ int cVideo::Stop(bool blank)
 	live_paused = false;
 	playstate = blank ? VIDEO_STOPPED : VIDEO_FREEZED;
 	blank_mode = blank;
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-	{
-		/* zapit always stops blanking; the zapping mode, which is the
-		 * emulated device's, decides: hold and hold till lock keep the
-		 * picture, as does a picture held on purpose */
-		bool hold = !held_zapmode.empty() || zapping_mode == 1;
-		h->StopVideo(blank && !hold);
-		return 0;
-	}
 	return fop(ioctl, VIDEO_STOP, blank ? 1 : 0);
 }
 
 int cVideo::setBlank(int enable)
 {
-	if (cHisiLive::forUnit(devnum))
-		return enable ? Stop(1) : Start();
 	fop(ioctl, VIDEO_PLAY);
 	fop(ioctl, VIDEO_CONTINUE);
 	if (enable)
@@ -961,9 +925,6 @@ bool cVideo::ShowPicture(const char *fname)
 		hal_info("%s: video_standby == true\n", __func__);
 		return ret;
 	}
-	/* the still picture goes through the emulated device, below the AVPLAY's window */
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		h->Hide();
 	/* in movieplayer mode, fd is not opened */
 	if (fd == -1)
 	{
@@ -1087,10 +1048,6 @@ void cVideo::ShowPig(int _x)
 	char buffer[64];
 	sprintf(buffer, "%d", _x);
 	proc_put(VMPEG_visible[devnum], buffer, strlen(buffer));
-#if BOXMODEL_HISILICON
-	if (_x == 0)
-		Pig(-2, -2, -2, -2);
-#endif
 
 }
 
@@ -1104,7 +1061,6 @@ void cVideo::Pig(int x, int y, int w, int h, int osd_w, int osd_h, int startx, i
 	int yres = 576; /* proc_get_hex("/proc/stb/vmpeg/0/yres") */
 	hal_debug("#%d %s: x:%d y:%d w:%d h:%d ow:%d oh:%d\n", devnum, __func__, x, y, w, h, osd_w, osd_h);
 	bool whole = x == -1 && y == -1 && w == -1 && h == -1;
-	bool parked = x == -2 && y == -2 && w == -2 && h == -2;
 	if (whole)
 	{
 		_w = xres;
@@ -1112,17 +1068,6 @@ void cVideo::Pig(int x, int y, int w, int h, int osd_w, int osd_h, int startx, i
 		_x = 0;
 		_y = 0;
 	}
-#if BOXMODEL_HISILICON
-	// reset with 0,0,0,0 or -1,-1,-1,-1 does not work.
-	// smallest pig size after activation is 18x23 pixel, so move black box outsize the screen
-	else if (x == -2 && y == -2 && w == -2 && h == -2)
-	{
-		_w = 0;
-		_h = 0;
-		_x = xres;
-		_y = yres;
-	}
-#endif
 	else
 	{
 		// need to do some additional adjustments because osd border is handled by blitter
@@ -1156,15 +1101,6 @@ void cVideo::Pig(int x, int y, int w, int h, int osd_w, int osd_h, int startx, i
 
 	sprintf(buffer, "%x", 1);
 	proc_put(VMPEG_dst_apply[devnum], buffer, strlen(buffer));
-
-	/* the emulated device keeps it for the players */
-	if (cHisiLive *live = cHisiLive::forUnit(devnum))
-	{
-		if (whole)
-			live->SetWindowRect(0, 0, 0, 0);
-		else if (!parked)
-			live->SetWindowRect(_x, _y, _w, _h);
-	}
 }
 
 static inline int rate2csapi(int rate)
@@ -1197,12 +1133,6 @@ void cVideo::getPictureInfo(int &width, int &height, int &rate)
 {
 	video_size_t s;
 	int r;
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		if (h->PictureInfo(width, height, r))
-		{
-			rate = rate2csapi(r);
-			return;
-		}
 	if (fd == -1)
 	{
 		/* in movieplayer mode, fd is not opened -> fall back to procfs */
@@ -1267,19 +1197,13 @@ int cVideo::SetStreamType(VIDEO_FORMAT type)
 			break;
 	}
 
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		h->SetVideoType(type);
-	else if (ioctl(fd, VIDEO_SET_STREAMTYPE, t) < 0)
+	if (ioctl(fd, VIDEO_SET_STREAMTYPE, t) < 0)
 		hal_info("%s VIDEO_SET_STREAMTYPE(%d) failed: %m\n", __func__, t);
 	return 0;
 }
 
 int64_t cVideo::GetPTS(void)
 {
-	/* the players of the emulated devices ask too, while live TV is off */
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		if (int64_t live = h->GetPts())
-			return live;
 	int64_t pts = 0;
 	if (ioctl(fd, VIDEO_GET_PTS, &pts) < 0)
 		hal_info("%s: GET_PTS failed (%m)\n", __func__);
@@ -1592,25 +1516,6 @@ inline void rgb24torgb32(unsigned char *src, unsigned char *dest, int picsize)
 }
 
 /* TODO: aspect ratio correction and PIP */
-/* the picture of the AVPLAY on the HiSilicon boxes, which video0 lacks */
-static bool getvideo_hisi(cHisiLive *h, unsigned char *video, int xres, int yres)
-{
-	return h->Capture([&](const cHisiLive::Frame &f)
-	{
-		struct SwsContext *sws = sws_getContext(f.width, f.height, f.nv12 ? AV_PIX_FMT_NV12 : AV_PIX_FMT_NV21,
-							xres, yres, AV_PIX_FMT_BGR24, SWS_BICUBIC, NULL, NULL, NULL);
-		if (!sws)
-			return false;
-		const uint8_t *src[4] = { f.y, f.c, NULL, NULL };
-		const int src_stride[4] = { f.y_stride, f.c_stride, 0, 0 };
-		uint8_t *dst[4] = { video, NULL, NULL, NULL };
-		const int dst_stride[4] = { xres * 3, 0, 0, 0 };
-		sws_scale(sws, src, src_stride, 0, f.height, dst, dst_stride);
-		sws_freeContext(sws);
-		return true;
-	});
-}
-
 bool cVideo::GetScreenImage(unsigned char *&out_data, int &xres, int &yres, bool get_video, bool get_osd, bool scale_to_video)
 {
 #define VDEC_PIXFMT AV_PIX_FMT_BGR24
@@ -1653,8 +1558,7 @@ bool cVideo::GetScreenImage(unsigned char *&out_data, int &xres, int &yres, bool
 		unsigned char *video_src = (unsigned char *)malloc(grab_w * grab_h * 3);
 		if (video_src == NULL)
 			return false;
-		cHisiLive *h = cHisiLive::forUnit(devnum);
-		if (!(h && getvideo_hisi(h, video_src, grab_w, grab_h)) && !getvideo2(video_src, grab_w, grab_h))
+		if (!getvideo2(video_src, grab_w, grab_h))
 		{
 			free(out_data);
 			free(video_src);

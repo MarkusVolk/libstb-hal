@@ -14,7 +14,6 @@ box_sources = files(
 	'dvb_player.cpp',
 	'dvb_sink.cpp',
 	'hdmi_cec.cpp',
-	'hisi_live.cpp',
 	'init.cpp',
 	'playback_libeplayer3.cpp',
 	'record.cpp',

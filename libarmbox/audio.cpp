@@ -13,7 +13,6 @@
 
 #include "audio_lib.h"
 #include "hal_debug.h"
-#include "hisi_live.h"
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_AUDIO, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_AUDIO, this, args)
@@ -228,21 +227,11 @@ int cAudio::setVolume(unsigned int left, unsigned int right)
 
 int cAudio::Start(void)
 {
-	cHisiLive *h = cHisiLive::forUnit(devnum);
-	if (h && h->DecodesAudio())
-		return h->StartAudio() ? 0 : -1;
-	int ret;
-	ret = ioctl(fd, AUDIO_PLAY);
-#if BOXMODEL_HISILICON
-	ioctl(fd, AUDIO_CONTINUE);
-#endif
-	return ret;
+	return ioctl(fd, AUDIO_PLAY);
 }
 
 int cAudio::Stop(void)
 {
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		h->StopAudio();
 	return ioctl(fd, AUDIO_STOP);
 }
 
@@ -264,9 +253,6 @@ void cAudio::SetStreamType(int bypass)
 
 	hal_info("%s %d (0x%x)\n", __FUNCTION__, bypass, bypass);
 
-	/* the emulated decoder plays what the AVPLAY does not decode */
-	if (cHisiLive *h = cHisiLive::forUnit(devnum))
-		h->SetAudioType(bypass);
 	if (ioctl(fd, AUDIO_SET_BYPASS_MODE, bypass) < 0)
 		hal_info("%s: AUDIO_SET_BYPASS_MODE failed (%m)\n", __func__);
 }

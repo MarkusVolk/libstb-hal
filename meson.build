@@ -14,7 +14,7 @@ boxtype = get_option('boxtype')
 boxmodel = get_option('boxmodel')
 box_models = {
 	'generic' : ['generic'],
-	'armbox' : ['hd60', 'hd61', 'multibox', 'multiboxse', 'hd51', 'bre2ze4k', 'h7', 'e4hdultra', 'protek4k',
+	'armbox' : ['hd51', 'bre2ze4k', 'h7', 'e4hdultra', 'protek4k',
 		'osmini4k', 'osmio4k', 'osmio4kplus', 'vusolo4k', 'vuduo4k', 'vuduo4kse', 'vuultimo4k',
 		'vuuno4k', 'vuuno4kse', 'vuzero4k'],
 	'mipsbox' : ['vuduo', 'vuduo2', 'gb800se', 'osnino', 'osninoplus', 'osninopro'],
@@ -28,10 +28,9 @@ endif
 box_groups = {
 	'VUPLUS_ARM' : ['vusolo4k', 'vuduo4k', 'vuduo4kse', 'vuultimo4k', 'vuuno4k', 'vuuno4kse', 'vuzero4k'],
 	'VUPLUS_MIPS' : ['vuduo', 'vuduo2'],
-	'HISILICON' : ['hd60', 'hd61', 'multibox', 'multiboxse'],
 }
 box_groups += {'VUPLUS_ALL' : box_groups['VUPLUS_ARM'] + box_groups['VUPLUS_MIPS']}
-have_ci = boxtype != 'generic' and boxmodel not in ['hd60', 'multibox', 'multiboxse', 'osmini4k', 'osmio4k', 'osmio4kplus']
+have_ci = boxtype != 'generic' and boxmodel not in ['osmini4k', 'osmio4k', 'osmio4kplus']
 box_defines = {
 	'generic' : 'HAVE_GENERIC_HARDWARE',
 	'armbox' : 'HAVE_ARM_HARDWARE',

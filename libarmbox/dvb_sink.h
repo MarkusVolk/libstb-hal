@@ -1,6 +1,5 @@
 /*
- * Where the PES of cDvbPlayer goes: the decoder devices, or on the
- * HiSilicon boxes the AVPLAY that plays live TV
+ * Where the PES of cDvbPlayer goes: the decoder devices
  *
  * Copyright (C) 2026 Markus Volk
  *
@@ -50,7 +49,5 @@ class cDvbSink
 
 /* the video and audio devices of the live decoders */
 cDvbSink *newDeviceSink();
-/* the AVPLAY of live TV on the HiSilicon boxes, NULL elsewhere */
-cDvbSink *newHisiSink();
 
 #endif

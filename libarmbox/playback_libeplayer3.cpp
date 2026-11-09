@@ -23,7 +23,6 @@ extern "C" {
 #include "playback_libeplayer3.h"
 #include "dvb_player.h"
 #include "hal_debug.h"
-#include "hisi_live.h"
 
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_PLAYBACK, this, args)
 #define hal_info(args...)  _hal_info(HAL_DEBUG_PLAYBACK, this, args)
@@ -257,8 +256,6 @@ bool cPlayback::Start(char *filename, int vpid, int vtype, int apid, int ac3, in
 			ret = true;
 			videoDecoder->Stop(false);
 			audioDecoder->Stop();
-			if (cHisiLive *h = cHisiLive::getInstance())
-				h->Hide();
 		}
 		else
 		{

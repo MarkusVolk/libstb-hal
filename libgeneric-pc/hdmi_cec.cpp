@@ -131,7 +131,7 @@ bool hdmi_cec::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)
 
 	hal_info(GREEN "[CEC] switch on %s\n" NORMAL, __func__);
 
-#if BOXMODEL_VUPLUS_ALL || BOXMODEL_HISILICON
+#if BOXMODEL_VUPLUS_ALL
 	if (hdmiFd == -1)
 	{
 		hdmiFd = ::open(CEC_HDMIDEV, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -149,7 +149,7 @@ bool hdmi_cec::SetCECMode(VIDEO_HDMI_CEC_MODE _deviceType)
 		if (hdmiFd >= 0)
 		{
 			fallback = true;
-#if BOXMODEL_VUPLUS_ALL || BOXMODEL_HISILICON
+#if BOXMODEL_VUPLUS_ALL
 			hal_info(RED "[CEC] fallback on %s\n" NORMAL, __func__);
 #endif
 
@@ -400,7 +400,7 @@ void hdmi_cec::SetCECState(bool state)
 		message.length = 1;
 		SendCECMessage(message);
 
-#if BOXMODEL_VUPLUS_ALL || BOXMODEL_HISILICON
+#if BOXMODEL_VUPLUS_ALL
 		int cnt = 0;
 
 		while (tv_off && (cnt < 5))
@@ -419,7 +419,7 @@ void hdmi_cec::SetCECState(bool state)
 			message.length = 1;
 			SendCECMessage(message);
 
-#if BOXMODEL_VUPLUS_ALL || BOXMODEL_HISILICON
+#if BOXMODEL_VUPLUS_ALL
 			cnt++;
 		}
 #endif
