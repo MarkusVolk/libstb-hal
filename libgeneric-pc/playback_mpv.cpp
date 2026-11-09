@@ -533,8 +533,18 @@ bool cPlayback::GetPosition(int &position, int &duration, bool isWebChannel)
 	else if (pm != PLAYMODE_TS || fn_ts.empty())
 		duration = 0;
 #if HAVE_WIDEVINE
-	if (!cenc_url.empty() && duration <= 0)
-		duration = (int)cenc::durationMs(cenc_url);
+	if (!cenc_url.empty())
+	{
+		/* the stream starts anew at each seek and mpv counts from there;
+		 * what mpv takes for the duration is only what it has buffered of
+		 * the stream, the manifest knows the whole */
+		cCencParams cp;
+		if (cenc::params(cenc_url, cp))
+			position += (int)cp.start_ms;
+		int whole = (int)cenc::durationMs(cenc_url);
+		if (whole > 0)
+			duration = whole;
+	}
 #endif
 
 	if (engine->eofReached())
@@ -583,6 +593,9 @@ bool cPlayback::SetPosition(int position, bool absolute)
 		p.start_ms = position > 0 ? position : 0;
 		cenc_url = cenc::add(p);
 		playing = engine->load(cenc_url, std::vector<std::string>(), "", "", 0, abort_gen);
+		/* the load leaves mpv paused */
+		if (playing && nPlaybackSpeed != 0)
+			engine->setFlag("pause", false);
 		return playing;
 	}
 #endif
