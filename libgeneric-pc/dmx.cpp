@@ -44,6 +44,7 @@ extern cVideo *videoDecoder;
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_DEMUX, this, args)
 #define hal_info(args...) _hal_info(HAL_DEBUG_DEMUX, this, args)
 #define hal_info_c(args...) _hal_info(HAL_DEBUG_DEMUX, NULL, args)
+#define hal_debug_c(args...) _hal_debug(HAL_DEBUG_DEMUX, NULL, args)
 
 #define dmx_err(_errfmt, _errstr, _revents) do { \
 		hal_info("%s " _errfmt " fd:%d, ev:0x%x %s pid:0x%04hx flt:0x%02hx\n", \
@@ -66,13 +67,9 @@ static const char *DMX_T[] =
 	"DMX_PCR"
 };
 
-/* map the device numbers. for now only demux0 is used */
-static const char *devname[] =
-{
-	"/dev/dvb/adapter0/demux0",
-	"/dev/dvb/adapter0/demux0",
-	"/dev/dvb/adapter0/demux0"
-};
+/* live and one unit per tuner; zapit points each unit at the demux of its frontend */
+#define NUM_DEMUX 3
+static int dmx_source[NUM_DEMUX];
 
 /* uuuugly */
 static int dmx_tp_count = 0;
@@ -127,7 +124,7 @@ void hal_live_pids(uint16_t &vpid, uint16_t &apid, uint16_t &pcrpid)
 
 cDemux::cDemux(int n)
 {
-	if (n < 0 || n > 2)
+	if (n < 0 || n >= NUM_DEMUX)
 	{
 		hal_info("%s ERROR: n invalid (%d)\n", __FUNCTION__, n);
 		num = 0;
@@ -150,7 +147,7 @@ cDemux::~cDemux()
 
 bool cDemux::Open(DMX_CHANNEL_TYPE pes_type, void * /*hVideoBuffer*/, int uBufferSize)
 {
-	int devnum = num;
+	char devname[32];
 	int flags = O_RDWR | O_CLOEXEC;
 	if (fd > -1 || pdata)
 	{
@@ -182,10 +179,11 @@ bool cDemux::Open(DMX_CHANNEL_TYPE pes_type, void * /*hVideoBuffer*/, int uBuffe
 		return true;
 	}
 
-	fd = open(devname[devnum], flags);
+	snprintf(devname, sizeof(devname), "/dev/dvb/adapter0/demux%d", dmx_source[num]);
+	fd = open(devname, flags);
 	if (fd < 0)
 	{
-		hal_info("%s %s: %m\n", __FUNCTION__, devname[devnum]);
+		hal_info("%s %s: %m\n", __FUNCTION__, devname);
 		return false;
 	}
 	hal_debug("%s #%d pes_type: %s(%d), uBufferSize: %d fd: %d\n",
@@ -675,12 +673,22 @@ int cDemux::getUnit(void)
 
 bool cDemux::SetSource(int unit, int source)
 {
-	hal_info_c("%s(%d, %d): not implemented yet\n", __func__, unit, source);
+	if (unit < 0 || unit >= NUM_DEMUX || source < 0 || source >= NUM_DEMUX)
+	{
+		hal_info_c("%s(%d, %d): out of range\n", __func__, unit, source);
+		return false;
+	}
+	hal_debug_c("%s(%d, %d) => %d to %d\n", __func__, unit, source, dmx_source[unit], source);
+	dmx_source[unit] = source;
 	return true;
 }
 
 int cDemux::GetSource(int unit)
 {
-	hal_info_c("%s(%d): not implemented yet\n", __func__, unit);
-	return 0;
+	if (unit < 0 || unit >= NUM_DEMUX)
+	{
+		hal_info_c("%s(%d): out of range\n", __func__, unit);
+		return -1;
+	}
+	return dmx_source[unit];
 }
