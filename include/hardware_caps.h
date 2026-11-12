@@ -101,6 +101,8 @@ typedef struct hw_caps
 	int multiboot_devicetree; /* the slot is read from the device tree */
 	int can_ar_16_10; /* appended last: keeps the layout of older headers */
 	int media_in_home; /* music, videos and pictures default to the user's home */
+	int windowed; /* shown in a window of a desktop, whose keys come from its compositor */
+	char render_node[64]; /* the DRM render node of the GPU the picture is drawn on, empty if unknown */
 } hw_caps_t;
 
 hw_caps_t *get_hwcaps(void);

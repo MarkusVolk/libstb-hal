@@ -71,7 +71,8 @@ hw_caps_t *get_hwcaps(void)
 
 	caps.can_cpufreq = 0;
 	/* a desktop shuts down and reboots itself, the box does it through neutrino */
-	caps.can_shutdown = !(getenv("WAYLAND_DISPLAY") || getenv("DISPLAY"));
+	caps.windowed = getenv("WAYLAND_DISPLAY") || getenv("DISPLAY");
+	caps.can_shutdown = !caps.windowed;
 	caps.display_type = HW_DISPLAY_LINE_TEXT;
 	caps.has_HDMI = 1;
 	caps.can_cec = (access("/dev/cec0", F_OK) != -1);

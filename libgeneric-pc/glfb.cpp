@@ -892,6 +892,19 @@ bool GLFbPC::setupGLObjects()
 	    strstr(eglext, "EGL_EXT_buffer_age") && strstr(eglext, "EGL_KHR_partial_update"))
 		mEglSetDamageRegion = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLint *, EGLint))SDL_EGL_GetProcAddress("eglSetDamageRegionKHR");
 	memset(mDrawn, 0, sizeof(mDrawn));
+
+	/* which GPU draws: a program that renders for setSource() should use the same */
+	EGLBoolean (*display_attrib)(EGLDisplay, EGLint, intptr_t *) =
+		(EGLBoolean (*)(EGLDisplay, EGLint, intptr_t *))SDL_EGL_GetProcAddress("eglQueryDisplayAttribEXT");
+	const char *(*device_string)(void *, EGLint) =
+		(const char *(*)(void *, EGLint))SDL_EGL_GetProcAddress("eglQueryDeviceStringEXT");
+	intptr_t device = 0;
+	const char *node = NULL;
+	if (dpy && display_attrib && device_string && display_attrib(dpy, 0x322C /* EGL_DEVICE_EXT */, &device) && device)
+		node = device_string((void *)device, 0x3377 /* EGL_DRM_RENDER_NODE_FILE_EXT */);
+	hw_caps_t *caps = get_hwcaps();
+	snprintf(caps->render_node, sizeof(caps->render_node), "%s", node ? node : "");
+	hal_info("%s: render node %s\n", __func__, node ? node : "unknown");
 	return true;
 }
 
