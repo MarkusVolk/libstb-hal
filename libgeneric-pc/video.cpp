@@ -1277,6 +1277,14 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 	int vid_w = 0, vid_h = 0;
 	int osd_w = glfb_priv->getOSDWidth();
 	int osd_h = glfb_priv->getOSDHeight();
+	/* another program's picture is shown in place of the OSD */
+	std::vector<unsigned char> source;
+	int source_w = 0, source_h = 0;
+	if (get_osd && glfb_priv->grabSource(source, source_w, source_h))
+	{
+		osd_w = source_w;
+		osd_h = source_h;
+	}
 	xres = osd_w;
 	yres = osd_h;
 	cMpvEngine *engine = cMpvEngine::getInstance();
@@ -1364,7 +1372,7 @@ bool cVideo::GetScreenImage(unsigned char *&data, int &xres, int &yres, bool get
 		yres = osd_h;
 	}
 	if (get_osd)
-		osd = glfb_priv->getOSDBuffer();
+		osd = source.empty() ? glfb_priv->getOSDBuffer() : &source;
 	unsigned int need = av_image_get_buffer_size(AV_PIX_FMT_RGB32, xres, yres, 1);
 	unsigned char *grown = (unsigned char *)realloc(data, need); /* will be freed by caller */
 	if (grown == NULL) /* out of memory? the caller still owns its old buffer */

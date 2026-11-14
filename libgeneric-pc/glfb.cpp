@@ -344,6 +344,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mSourceOK = false;
 	mSourceFd = -1;
 	mSourceTex = 0;
+	mGrabPixels = NULL;
 	mEglCreateImage = NULL;
 	mEglDestroyImage = NULL;
 	mGlImageTarget = NULL;
@@ -1403,6 +1404,7 @@ void GLFbPC::render()
 	cMpvEngine *engine = cMpvEngine::getInstance();
 
 	serviceSource();
+	serviceGrab();
 
 	mReInitLock.lock();
 	if (mModeChange)
@@ -2050,6 +2052,8 @@ void GLFbPC::importSource(const SourceMsg &m)
 			 m.id, m.width, m.height, m.stride, (const char *)&m.format);
 		return;
 	}
+	b.width = m.width;
+	b.height = m.height;
 	glGenTextures(1, &b.tex);
 	glBindTexture(GL_TEXTURE_2D, b.tex);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -2108,6 +2112,53 @@ void GLFbPC::serviceSource()
 				mPlaneRedraw = 1;
 		}
 	}
+}
+
+bool GLFbPC::grabSource(std::vector<unsigned char> &pixels, int &width, int &height)
+{
+	std::unique_lock<std::mutex> lk(mGrabMutex);
+	mGrabPixels = &pixels;
+	mGrabDone = false;
+	mGrabW = mGrabH = 0;
+	wake();
+	/* a hidden window draws nothing and never answers */
+	mGrabCond.wait_for(lk, std::chrono::milliseconds(500), [this] { return mGrabDone; });
+	mGrabPixels = NULL;
+	width = mGrabW;
+	height = mGrabH;
+	return mGrabDone && width > 0;
+}
+
+void GLFbPC::serviceGrab()
+{
+	std::lock_guard<std::mutex> lk(mGrabMutex);
+	if (!mGrabPixels || mGrabDone)
+		return;
+	for (auto &b : mSourceBufs)
+	{
+		if (b.second.tex != mSourceTex)
+			continue;
+		GLuint fbo;
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mSourceTex, 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE)
+		{
+			mGrabW = b.second.width;
+			mGrabH = b.second.height;
+			mGrabPixels->resize(mGrabW * mGrabH * 4);
+			glPixelStorei(GL_PACK_ALIGNMENT, 1);
+			glReadPixels(0, 0, mGrabW, mGrabH, GL_RGBA, GL_UNSIGNED_BYTE, mGrabPixels->data());
+			/* the OSD has blue first */
+			for (size_t i = 0; i < mGrabPixels->size(); i += 4)
+				std::swap((*mGrabPixels)[i], (*mGrabPixels)[i + 2]);
+		}
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glDeleteFramebuffers(1, &fbo);
+		break;
+	}
+	mGrabDone = true;
+	mGrabCond.notify_all();
 }
 
 void GLFbPC::sourceDone()

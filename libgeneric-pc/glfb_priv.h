@@ -53,6 +53,9 @@ class GLFbPC
 		{
 			return osd_buf; /* pointer to OSD bounce buffer */
 		}
+		/* the source's picture as the OSD has its own, for a screenshot;
+		 * false while the OSD is shown */
+		bool grabSource(std::vector<unsigned char> &pixels, int &width, int &height);
 		int getOSDWidth()
 		{
 			return mState.width;
@@ -250,8 +253,11 @@ class GLFbPC
 		{
 			EGLImageKHR image;
 			GLuint tex;
+			int width;
+			int height;
 		};
 		bool setSource(int fd);
+		void serviceGrab();
 		void sourceReader(int fd);
 		void serviceSource();
 		void importSource(const SourceMsg &m);
@@ -265,6 +271,12 @@ class GLFbPC
 		std::map<unsigned, SourceBuffer> mSourceBufs; /* the GL thread's */
 		GLuint mSourceTex; /* the picture that is shown, 0 for the OSD */
 		std::vector<unsigned> mSourceShown; /* pictures to confirm after the next swap */
+		std::mutex mGrabMutex; /* a screenshot asks the GL thread for the picture */
+		std::condition_variable mGrabCond;
+		std::vector<unsigned char> *mGrabPixels;
+		bool mGrabDone;
+		int mGrabW;
+		int mGrabH;
 		void *(*mEglCreateImage)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
 		EGLBoolean (*mEglDestroyImage)(EGLDisplay, EGLImageKHR);
 		void (*mGlImageTarget)(GLenum, void *);
