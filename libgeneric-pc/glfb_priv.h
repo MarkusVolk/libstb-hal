@@ -298,6 +298,7 @@ class GLFbPC
 		uint64_t mPadNext; /* SDL ticks of its next repeat */
 		uint64_t mConnCheckNext; /* SDL ticks of the next look at the connectors */
 		bool mEdidMissing; /* what the log said last */
+		bool mDisplayWait; /* waiting for a display, its failures are not logged each time */
 		int mPadAxis[SDL_GAMEPAD_AXIS_COUNT]; /* the key each stick axis and trigger holds */
 		void padPress(int code);
 		void padRelease(int code);
@@ -314,6 +315,8 @@ class GLFbPC
 		bool setupGLObjects(); /* shaders, textures and stuff */
 		void releaseGLObjects();
 		bool createDisplay();
+		bool waitDisplay();
+		void abandonDisplay();
 		void offerDisplayModes();
 		void releaseDisplay();
 		void drawSquare(float size, float x_factor = 1); /* do not be square */

@@ -44,6 +44,7 @@
 #include <sys/socket.h>
 #include <climits>
 #include <algorithm>
+#include <chrono>
 #include <mpv/render_gl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -338,6 +339,7 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	memset(mDeintValue, 0, sizeof(mDeintValue));
 	mConnCheckNext = 0;
 	mEdidMissing = false;
+	mDisplayWait = false;
 	mRenderFd = -1;
 	mSuspendReq = false;
 	mSuspended = false;
@@ -559,7 +561,8 @@ bool GLFbPC::createDisplay()
 #endif
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
-		hal_info("GLFB: SDL_Init failed: %s\n", SDL_GetError());
+		if (!mDisplayWait)
+			hal_info("GLFB: SDL_Init failed: %s\n", SDL_GetError());
 		return false;
 	}
 	/* where the platform reads the remote itself, SDL's keys and gamepads
@@ -583,7 +586,8 @@ bool GLFbPC::createDisplay()
 	}
 	if (!mWindow)
 	{
-		hal_info("GLFB: SDL_CreateWindow failed: %s\n", SDL_GetError());
+		if (!mDisplayWait)
+			hal_info("GLFB: SDL_CreateWindow failed: %s\n", SDL_GetError());
 		return false;
 	}
 	/* GLFB_MODE=<width>x<height>[@<rate>] picks the mode of the display for
@@ -606,7 +610,8 @@ bool GLFbPC::createDisplay()
 	mContext = SDL_GL_CreateContext(mWindow);
 	if (!mContext)
 	{
-		hal_info("GLFB: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+		if (!mDisplayWait)
+			hal_info("GLFB: SDL_GL_CreateContext failed: %s\n", SDL_GetError());
 		return false;
 	}
 	SDL_GL_MakeCurrent(mWindow, mContext);
@@ -621,7 +626,8 @@ bool GLFbPC::createDisplay()
 	SDL_StartTextInput(mWindow);
 	if (!setupGLObjects())
 	{
-		hal_info("GLFB: could not set up the OpenGL ES 2.0 objects\n");
+		if (!mDisplayWait)
+			hal_info("GLFB: could not set up the OpenGL ES 2.0 objects\n");
 		return false;
 	}
 	if (!mUserEvent)
@@ -631,6 +637,64 @@ bool GLFbPC::createDisplay()
 	mReInit = true;
 	mOsdResize = true;
 	mState.blit = true;
+	return true;
+}
+
+/* what a createDisplay() that failed half way made */
+void GLFbPC::abandonDisplay()
+{
+	if (mContext)
+		SDL_GL_DestroyContext(mContext);
+	mContext = NULL;
+	platform_input_stop();
+	if (mWindow)
+	{
+		platform_release_window();
+		SDL_DestroyWindow(mWindow);
+	}
+	mWindow = NULL;
+	SDL_QuitSubSystem(SDL_INIT_GAMEPAD | SDL_INIT_VIDEO);
+}
+
+/* A box may start, or get the display back from another program, while the
+ * television is off or not plugged in, and KMS then has no display for SDL.
+ * Neutrino runs on without one, recording and answering the network, and the
+ * display is tried every two seconds. Another program that wants it meanwhile
+ * is told at once that there is none to give. True once there is a display. */
+bool GLFbPC::waitDisplay()
+{
+	if (!mDisplayWait)
+		hal_info("GLFB: no display, running without one\n");
+	mDisplayWait = true;
+	abandonDisplay();
+	{
+		std::unique_lock<std::mutex> lk(mStateMutex);
+		if (mSuspendReq)
+		{
+			mSuspended = true;
+			mStateCond.notify_all();
+			mStateCond.wait(lk, [this] { return !mSuspendReq || mShutDown; });
+			mSuspended = false;
+			mStateCond.notify_all();
+		}
+		mStateCond.wait_for(lk, std::chrono::seconds(2), [this] { return mSuspendReq || mShutDown; });
+		if (mSuspendReq || mShutDown)
+			return false;
+	}
+	if (!createDisplay())
+		return false;
+	mDisplayWait = false;
+	hal_info("GLFB: a display is there\n");
+	/* a video that started meanwhile found no output and plays without
+	 * picture; it gets one now */
+	cMpvEngine *engine = cMpvEngine::getInstance();
+	if (engine)
+	{
+		/* mpv dropped the video track when it found no output; choosing it
+		 * again opens the output anew */
+		mpv_command_string(engine->getHandle(), "set vid no");
+		mpv_command_string(engine->getHandle(), "set vid auto");
+	}
 	return true;
 }
 
@@ -683,8 +747,7 @@ void GLFramebuffer::run()
 	int x = glfb_priv->mState.width;
 	int y = glfb_priv->mState.height;
 	hal_info("GLFB: GL thread starting x %d y %d\n", x, y);
-	if (!glfb_priv->createDisplay())
-		_exit(1); /* Life is hard */
+	bool shown = glfb_priv->createDisplay();
 	/* 32bit FB depth, *2 because tuxtxt uses a shadow buffer */
 	/* room for the largest OSD, see setOSDResolution() */
 	int fbmem = (x > 1920 ? x : 1920) * (y > 1080 ? y : 1080) * 4 * 2;
@@ -704,6 +767,11 @@ void GLFramebuffer::run()
 	pthread_sigmask(SIG_BLOCK, &set, NULL);
 	while (!glfb_priv->mShutDown)
 	{
+		if (!shown)
+		{
+			shown = glfb_priv->waitDisplay();
+			continue;
+		}
 		if (glfb_priv->mSuspendReq)
 		{
 			/* another program has the display until resume() */
@@ -717,9 +785,9 @@ void GLFramebuffer::run()
 			}
 			if (glfb_priv->mShutDown)
 				break;
-			if (!glfb_priv->createDisplay())
-				_exit(1);
-			hal_info("GLFB: display taken back\n");
+			shown = glfb_priv->createDisplay();
+			if (shown)
+				hal_info("GLFB: display taken back\n");
 			{
 				std::lock_guard<std::mutex> lk(glfb_priv->mStateMutex);
 				glfb_priv->mSuspended = false;
@@ -730,7 +798,9 @@ void GLFramebuffer::run()
 		glfb_priv->pollEvents();
 		glfb_priv->render();
 	}
-	if (!glfb_priv->mSuspended)
+	if (!shown)
+		glfb_priv->abandonDisplay();
+	else if (!glfb_priv->mSuspended)
 	{
 		glfb_priv->teardownRender();
 		glfb_priv->releaseGLObjects();
