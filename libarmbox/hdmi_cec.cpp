@@ -624,13 +624,31 @@ void hdmi_cec::run()
 	close(epollfd);
 }
 
+/* the operands a handler below reads; a frame that is too short for them
+ * came out of a disturbed bus and is dropped */
+static int cec_operands(unsigned char opcode)
+{
+	switch (opcode)
+	{
+		case CEC_OPCODE_REPORT_AUDIO_STATUS:
+		case CEC_OPCODE_REPORT_POWER_STATUS:
+		case CEC_OPCODE_USER_CONTROL_PRESSED:
+			return 1;
+		case CEC_OPCODE_DEVICE_VENDOR_ID:
+		case CEC_OPCODE_VENDOR_COMMAND_WITH_ID:
+			return 3;
+		default:
+			return 0;
+	}
+}
+
 void hdmi_cec::Receive(int what)
 {
 	if (what & EPOLLIN)
 	{
 
 		bool hasdata = false;
-		struct cec_message rxmessage;
+		struct cec_message rxmessage = {};
 		struct cec_message txmessage;
 
 		if (fallback)
@@ -651,7 +669,7 @@ void hdmi_cec::Receive(int what)
 			struct cec_message_fb rx_message;
 			if (::read(hdmiFd, &rx_message, 2) == 2)
 			{
-				if (::read(hdmiFd, &rx_message.data, rx_message.length) == rx_message.length)
+				if (rx_message.length > 0 && ::read(hdmiFd, &rx_message.data, rx_message.length) == rx_message.length)
 				{
 					rxmessage.length = rx_message.length;
 					rxmessage.initiator = rx_message.address;
@@ -661,6 +679,12 @@ void hdmi_cec::Receive(int what)
 					hasdata = true;
 				}
 			}
+		}
+
+		if (hasdata && rxmessage.length < 1 + cec_operands(rxmessage.opcode))
+		{
+			hal_info(RED "[CEC] '%s' with %d bytes dropped\n" NORMAL, ToString((cec_opcode)rxmessage.opcode), rxmessage.length);
+			hasdata = false;
 		}
 
 		if (hasdata)
