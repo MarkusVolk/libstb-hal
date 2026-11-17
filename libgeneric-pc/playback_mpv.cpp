@@ -26,7 +26,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
-#include "playback_lib.h"
+#include "playback_hal.h"
 #include "mpv_player.h"
 #include "hal_debug.h"
 #include "hw_player.h"
@@ -662,6 +662,20 @@ void cPlayback::FindAllPids(int *apids, unsigned int *ac3flags, unsigned int *nu
 		n++;
 	}
 	*numpida = n;
+}
+
+unsigned int cPlayback::GetAudioFlags(int pid)
+{
+	if (hwActive || !engine)
+		return 0;
+	int64_t id = trackForPid(engine, "audio", pid);
+	std::vector<cMpvEngine::Track> tracks;
+	engine->getTracks(tracks);
+	for (size_t i = 0; i < tracks.size(); i++)
+		if (tracks[i].type == "audio" && tracks[i].id == id)
+			return (tracks[i].visualImpaired ? PLAYBACK_AUDIO_DESCRIPTION : 0) |
+			       (tracks[i].dependent ? PLAYBACK_AUDIO_DEPENDENT : 0);
+	return 0;
 }
 
 void cPlayback::FindAllPids(uint16_t *apids, unsigned short *ac3flags, uint16_t *numpida, std::string *language)

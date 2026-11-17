@@ -73,6 +73,8 @@ class cPlayback
 		void GetPts(uint64_t &pts);
 		bool SetPosition(int position, bool absolute = false);
 		void FindAllPids(uint16_t *apids, unsigned short *ac3flags, uint16_t *numpida, std::string *language);
+		/* PLAYBACK_AUDIO_* of a track FindAllPids() gave: eplayer3 knows none */
+		unsigned int GetAudioFlags(int) { return 0; }
 		void FindAllSubs(short unsigned int *pids, short unsigned int *supported, short unsigned int *numpida, std::string *language);
 		bool SelectSubtitles(int pid, std::string charset = "");
 		void FindAllSubtitlePids(int *pids, unsigned int *numpids, std::string *language);

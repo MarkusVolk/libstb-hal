@@ -42,6 +42,8 @@ extern "C" {
 
 #include "mpv_player.h"
 #include "dmx_hal.h"
+
+#include <algorithm>
 #include "video_lib.h"
 #include "audio_lib.h"
 #include "hal_debug.h"
@@ -1161,6 +1163,16 @@ void cMpvEngine::tracksChanged()
 	mTracksGen++;
 }
 
+/* An audio description is marked in MPEG-TS and with CHARACTERISTICS in HLS,
+ * but streams such as the live HLS of ZDF only name it ("Audio-Deskription") */
+static bool describesVideo(const std::string &title)
+{
+	std::string t = title;
+	std::transform(t.begin(), t.end(), t.begin(), ::tolower);
+	return t.find("deskription") != std::string::npos || t.find("description") != std::string::npos ||
+	       t.find("hörfilm") != std::string::npos;
+}
+
 bool cMpvEngine::getTracks(std::vector<Track> &tracks)
 {
 	mTracksLock.lock();
@@ -1191,6 +1203,8 @@ bool cMpvEngine::getTracks(std::vector<Track> &tracks)
 			tr.title = nodeString(nodeMapGet(t, "title"));
 			tr.external = nodeFlag(nodeMapGet(t, "external"));
 			tr.selected = nodeFlag(nodeMapGet(t, "selected"));
+			tr.visualImpaired = nodeFlag(nodeMapGet(t, "visual-impaired")) || describesVideo(tr.title);
+			tr.dependent = nodeFlag(nodeMapGet(t, "dependent"));
 			tracks.push_back(tr);
 		}
 	}

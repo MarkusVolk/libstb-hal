@@ -48,6 +48,8 @@ class cMpvEngine : public OpenThreads::Thread
 			std::string title;
 			bool external;
 			bool selected;
+			bool visualImpaired; /* audio description */
+			bool dependent; /* to be mixed with another track */
 		};
 		struct Chapter
 		{

@@ -84,6 +84,8 @@ class cPlayback
 		bool SetPosition(int position, bool absolute = false);
 		void FindAllPids(int *apids, unsigned int *ac3flags, unsigned int *numpida, std::string *language);
 		void FindAllPids(uint16_t *apids, unsigned short *ac3flags, uint16_t *numpida, std::string *language);
+		/* PLAYBACK_AUDIO_* of a track FindAllPids() gave */
+		unsigned int GetAudioFlags(int pid);
 		void FindAllSubtitlePids(int *pids, unsigned int *numpids, std::string *language);
 		void FindAllTeletextsubtitlePids(int *pids, unsigned int *numpidt, std::string *tlanguage, int *mags, int *pages);
 		void RequestAbort(void);
