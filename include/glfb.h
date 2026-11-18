@@ -53,6 +53,9 @@ class GLFramebuffer : public OpenThreads::Thread
 		 * framebuffer's from then on; glfb.cpp has what it sends. false
 		 * where the display cannot take such pictures */
 		bool setSource(int fd);
+		/* how dark the video is behind the OSD, 0 to 100, for the menus to
+		 * stand out; it shows with the next blit() */
+		void setDim(int percent);
 
 	private:
 		fb_var_screeninfo si;

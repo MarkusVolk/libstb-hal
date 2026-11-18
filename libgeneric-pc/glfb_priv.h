@@ -291,6 +291,8 @@ class GLFbPC
 		uint64_t osdScan(int box[4]); /* one pass: where the OSD shows anything, and a sum of it */
 		uint64_t mOsdSum; /* of the OSD that is on the window's plane */
 		int mPlaneRedraw; /* swaps the window needs although the OSD did not change */
+		std::atomic<int> mDimWant; /* see GLFramebuffer::setDim() */
+		int mDim; /* what of it is on the screen */
 		bool directVideo(int w, int h);
 		bool renderDirect();
 		/* a gamepad as remote control: what is held down repeats */

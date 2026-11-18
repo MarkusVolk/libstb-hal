@@ -210,6 +210,11 @@ bool GLFramebuffer::setSource(int fd)
 	return glfb_priv->setSource(fd);
 }
 
+void GLFramebuffer::setDim(int percent)
+{
+	glfb_priv->mDimWant = std::max(0, std::min(100, percent));
+}
+
 void GLFramebuffer::setTerminalFd(int fd)
 {
 	glfb_priv->mTermFd = fd;
@@ -357,6 +362,8 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mModeW = mModeH = 0;
 	mOsdSum = 0;
 	mPlaneRedraw = 1;
+	mDimWant = 0;
+	mDim = 0;
 	mMargins[0] = mMargins[1] = mMargins[2] = mMargins[3] = 0;
 	mFit[0] = mFit[1] = 0;
 	mDar = 0;
@@ -1615,6 +1622,19 @@ void GLFbPC::render()
 	}
 	mDar = vp.valid ? vp.dar : 0;
 
+	/* the video darkened behind the menus: not the picture inside them, and
+	 * not behind another program's pictures */
+	const bool in_menu = videoDecoder && videoDecoder->pig_x >= 0 && videoDecoder->pig_y >= 0 &&
+			     videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0;
+	const int dim = (in_menu || mSourceTex) ? 0 : mDimWant.load();
+	if (dim != mDim)
+	{
+		mDim = dim;
+		/* the whole window, also where the OSD has not changed */
+		mPlaneRedraw = std::max(mPlaneRedraw, 1);
+		mState.blit = true;
+	}
+
 	/* The video on the plane below the window: the GPU only draws the OSD,
 	 * and only when it has changed. */
 	const bool on_plane = (mPlaneOK && vp.valid && vp.drmprime) || mExternalVideo;
@@ -1717,7 +1737,8 @@ void GLFbPC::render()
 			glEnable(GL_SCISSOR_TEST);
 			glScissor(mClip[0], mClip[1], mClip[2] - mClip[0], mClip[3] - mClip[1]);
 		}
-		glClearColor(0.0, 0.0, 0.0, 0.0);
+		/* black with an alpha darkens the plane below as much */
+		glClearColor(0.0, 0.0, 0.0, mDim / 100.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
 		glClearColor(0.0, 0.0, 0.0, 1.0);
 		drawOSD();
@@ -1931,6 +1952,22 @@ void GLFbPC::render()
 			drawSquare(zoom, xscale);
 			glEnable(GL_BLEND);
 		}
+	}
+	if (mDim)
+	{
+		/* what is drawn so far times a constant; the texture does not count */
+		const float keep = 1.0f - mDim / 100.0f;
+		glEnable(GL_BLEND);
+		glBlendColor(keep, keep, keep, 1.0f);
+		glBlendFunc(GL_ZERO, GL_CONSTANT_COLOR);
+		useProgram(true);
+		glBindTexture(GL_TEXTURE_2D, mState.osdtex);
+		/* all of the viewport, which may be wider than the OSD */
+		const float xproj = mState.xproj;
+		mState.xproj = 1.0f;
+		drawSquare(1.0, -100);
+		mState.xproj = xproj;
+		glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
 	}
 	if (video_full)
 		glViewport(mViewX, mViewY, *mX, *mY);
