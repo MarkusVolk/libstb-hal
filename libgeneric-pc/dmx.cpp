@@ -88,9 +88,10 @@ struct dmx_priv
 
 /* With mpv doing live TV there is one transport stream for picture and
  * sound, opened by the engine. The video, audio and PCR demux that zapit
- * sets up only tell which PIDs that stream needs. */
+ * sets up only tell which PIDs that stream needs; the other units do the
+ * same for the picture in picture. */
 static OpenThreads::Mutex live_lock;
-static uint16_t live_pid[3];
+static uint16_t live_pid[NUM_DEMUX][3];
 
 static int live_index(DMX_CHANNEL_TYPE t)
 {
@@ -103,23 +104,31 @@ static int live_index(DMX_CHANNEL_TYPE t)
 	}
 }
 
-static void live_set_pid(DMX_CHANNEL_TYPE t, uint16_t pid)
+static void live_set_pid(int unit, DMX_CHANNEL_TYPE t, uint16_t pid)
 {
 	int i = live_index(t);
 	if (i < 0)
 		return;
 	live_lock.lock();
-	live_pid[i] = pid;
+	live_pid[unit][i] = pid;
+	live_lock.unlock();
+}
+
+void hal_unit_pids(int unit, uint16_t &vpid, uint16_t &apid, uint16_t &pcrpid)
+{
+	vpid = apid = pcrpid = 0;
+	if (unit < 0 || unit >= NUM_DEMUX)
+		return;
+	live_lock.lock();
+	vpid = live_pid[unit][0];
+	apid = live_pid[unit][1];
+	pcrpid = live_pid[unit][2];
 	live_lock.unlock();
 }
 
 void hal_live_pids(uint16_t &vpid, uint16_t &apid, uint16_t &pcrpid)
 {
-	live_lock.lock();
-	vpid = live_pid[0];
-	apid = live_pid[1];
-	pcrpid = live_pid[2];
-	live_lock.unlock();
+	hal_unit_pids(0, vpid, apid, pcrpid);
 }
 
 cDemux::cDemux(int n)
@@ -223,7 +232,7 @@ void cDemux::Close(void)
 	{
 		bool done = PRIV->live || PRIV->file;
 		if (PRIV->live)
-			live_set_pid(dmx_type, 0);
+			live_set_pid(num, dmx_type, 0);
 		if (PRIV->file)
 		{
 			tsfile_close(PRIV->file);
@@ -281,7 +290,7 @@ bool cDemux::Stop(void)
 	hal_debug("%s #%d fd: %d type: %s\n", __func__, num, fd, DMX_T[dmx_type]);
 	if (pdata && PRIV->live)
 	{
-		live_set_pid(dmx_type, 0);
+		live_set_pid(num, dmx_type, 0);
 		return true;
 	}
 	if (pdata && PRIV->file)
@@ -536,7 +545,7 @@ bool cDemux::pesFilter(const unsigned short _pid)
 
 	if (pdata && PRIV->live)
 	{
-		live_set_pid(dmx_type, pid);
+		live_set_pid(num, dmx_type, pid);
 		return true;
 	}
 	if (pdata && PRIV->file)
