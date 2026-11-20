@@ -9,6 +9,7 @@
 #define __PIP_H__
 
 #include <deque>
+#include <vector>
 #include <stdint.h>
 
 #include <OpenThreads/Thread>
@@ -60,6 +61,7 @@ class cPip : public OpenThreads::Thread
 		void decode(const uint8_t *data, int size, int64_t pts);
 		void push(AVFrame *f);
 		void packet(const uint8_t *ts);
+		void flush();
 		void wake();
 		void (*mWake)(void *);
 		void *mWakeCtx;
@@ -80,6 +82,9 @@ class cPip : public OpenThreads::Thread
 		AVCodecContext *mCtx;
 		AVCodecParserContext *mParser;
 		AVBufferRef *mHw;
+		AVPacket *mPkt;
+		AVFrame *mFrame;
+		std::vector<uint8_t> mPes;	/* the PES packet being collected */
 		bool mPesOpen;
 		int64_t mPesPts;
 		int mBadFrames;

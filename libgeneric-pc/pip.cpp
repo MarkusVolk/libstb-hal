@@ -36,6 +36,7 @@ extern "C" {
 /* how far the picture runs behind the stream: a broadcast sends a large
  * picture early and over a long time, its decoding may come late */
 #define PIP_DELAY_US 300000
+#define PIP_PES_MAX (1024 * 1024)
 
 static int64_t monotonic_us(void)
 {
@@ -68,6 +69,8 @@ cPip::cPip()
 	mCtx = NULL;
 	mParser = NULL;
 	mHw = NULL;
+	mPkt = NULL;
+	mFrame = NULL;
 	mPesOpen = false;
 	mPesPts = AV_NOPTS_VALUE;
 	mBadFrames = 0;
@@ -262,7 +265,9 @@ bool cPip::openDecoder()
 	}
 	mCtx = avcodec_alloc_context3(codec);
 	mParser = av_parser_init(id);
-	if (!mCtx || !mParser)
+	mPkt = av_packet_alloc();
+	mFrame = av_frame_alloc();
+	if (!mCtx || !mParser || !mPkt || !mFrame)
 		return false;
 	mCtx->pkt_timebase = (AVRational) { 1, 90000 };
 	/* the frames the GL thread holds on top of what the decoder needs */
@@ -294,8 +299,11 @@ void cPip::closeDecoder()
 	if (mParser)
 		av_parser_close(mParser);
 	mParser = NULL;
+	av_packet_free(&mPkt);
+	av_frame_free(&mFrame);
 	avcodec_free_context(&mCtx);
 	av_buffer_unref(&mHw);
+	mPes.clear();
 }
 
 void cPip::push(AVFrame *f)
@@ -320,9 +328,7 @@ void cPip::push(AVFrame *f)
 
 void cPip::decode(const uint8_t *data, int size, int64_t pts)
 {
-	AVPacket *pkt = av_packet_alloc();
-	AVFrame *f = av_frame_alloc();
-	while (size > 0 && pkt && f)
+	while (size > 0 && mFrame)
 	{
 		uint8_t *out = NULL;
 		int out_size = 0;
@@ -334,26 +340,33 @@ void cPip::decode(const uint8_t *data, int size, int64_t pts)
 		pts = AV_NOPTS_VALUE;
 		if (!out_size)
 			continue;
-		pkt->data = out;
-		pkt->size = out_size;
-		pkt->pts = mParser->pts;
-		pkt->dts = mParser->dts;
-		if (avcodec_send_packet(mCtx, pkt) < 0)
+		mPkt->data = out;
+		mPkt->size = out_size;
+		mPkt->pts = mParser->pts;
+		mPkt->dts = mParser->dts;
+		if (avcodec_send_packet(mCtx, mPkt) < 0)
 			continue;
-		while (avcodec_receive_frame(mCtx, f) == 0)
+		while (avcodec_receive_frame(mCtx, mFrame) == 0)
 		{
-			push(f);
-			f = av_frame_alloc();
-			if (!f)
+			push(mFrame);
+			mFrame = av_frame_alloc();
+			if (!mFrame)
 				break;
 		}
 	}
-	av_frame_free(&f);
-	av_packet_free(&pkt);
+}
+
+/* a PES packet goes to the parser whole, when the next one starts */
+void cPip::flush()
+{
+	if (!mPes.empty())
+		decode(mPes.data(), mPes.size(), mPesPts);
+	mPes.clear();
+	mPesPts = AV_NOPTS_VALUE;
 }
 
 /* a transport packet of the video PID: the PES header gives the PTS, the
- * rest goes to the parser */
+ * payload is collected */
 void cPip::packet(const uint8_t *ts)
 {
 	int pid = ((ts[1] & 0x1f) << 8) | ts[2];
@@ -371,27 +384,30 @@ void cPip::packet(const uint8_t *ts)
 	int len = TS_SIZE - off;
 	if (ts[1] & 0x40)
 	{
-		if (len < 9 || p[0] || p[1] || p[2] != 1)
+		flush();
+		int hdr = len >= 9 ? 9 + p[8] : len + 1;
+		if (len < 9 || p[0] || p[1] || p[2] != 1 || hdr > len)
 		{
 			mPesOpen = false;
 			return;
 		}
-		int hdr = 9 + p[8];
-		int64_t pts = AV_NOPTS_VALUE;
 		if ((p[7] & 0x80) && len >= 14)
-			pts = ((int64_t)(p[9] & 0x0e) << 29) | (p[10] << 22) | ((p[11] & 0xfe) << 14) |
-			      (p[12] << 7) | (p[13] >> 1);
-		if (hdr > len)
-		{
-			mPesOpen = false;
-			return;
-		}
+			mPesPts = ((int64_t)(p[9] & 0x0e) << 29) | (p[10] << 22) | ((p[11] & 0xfe) << 14) |
+				  (p[12] << 7) | (p[13] >> 1);
 		mPesOpen = true;
-		decode(p + hdr, len - hdr, pts);
+		mPes.insert(mPes.end(), p + hdr, p + len);
 		return;
 	}
-	if (mPesOpen)
-		decode(p, len, AV_NOPTS_VALUE);
+	if (!mPesOpen)
+		return;
+	mPes.insert(mPes.end(), p, p + len);
+	/* a video PES may have no length: one that grows this far goes on */
+	if (mPes.size() >= PIP_PES_MAX)
+	{
+		decode(mPes.data(), mPes.size(), mPesPts);
+		mPes.clear();
+		mPesPts = AV_NOPTS_VALUE;
+	}
 }
 
 void cPip::run()
@@ -409,6 +425,9 @@ void cPip::run()
 		return;
 	}
 	mPesOpen = false;
+	mPes.clear();
+	mPes.reserve(256 * 1024);
+	mPesPts = AV_NOPTS_VALUE;
 	mBadFrames = 0;
 	mBase = INT64_MIN;
 
@@ -440,6 +459,7 @@ void cPip::run()
 			{
 				pos++;
 				mPesOpen = false;
+				mPes.clear();
 				continue;
 			}
 			packet(buf + pos);
