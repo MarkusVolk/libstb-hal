@@ -82,6 +82,7 @@ class GLFbPC
 						mDamage[3] = std::max(mDamage[3], rect[3]);
 					}
 				}
+				mDimBlit = mDimWant.load();
 			}
 			mState.blit = true;
 			wake();
@@ -313,6 +314,11 @@ class GLFbPC
 		uint64_t mOsdSum; /* of the OSD that is on the window's plane */
 		int mPlaneRedraw; /* swaps the window needs although the OSD did not change */
 		std::atomic<int> mDimWant; /* see GLFramebuffer::setDim() */
+		/* mDimWant as the last blit() found it, under mDamageLock, and as the
+		 * GL thread took it with that blit's damage: the picture gets dark in
+		 * the frame that draws the menu, not one before or after it */
+		int mDimBlit = 0;
+		int mDimTaken = 0;
 		int mDim; /* what of it is on the screen */
 		bool directVideo(int w, int h);
 		bool renderDirect();

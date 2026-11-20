@@ -1649,10 +1649,15 @@ void GLFbPC::render()
 	 * not behind another program's pictures */
 	const bool in_menu = videoDecoder && videoDecoder->pig_x >= 0 && videoDecoder->pig_y >= 0 &&
 			     videoDecoder->pig_w > 0 && videoDecoder->pig_h > 0;
-	const int dim = (in_menu || mSourceTex) ? 0 : mDimWant.load();
-	if (dim != mDim)
-	{
+	auto take_dim = [&]() {
+		const int dim = (in_menu || mSourceTex) ? 0 : mDimTaken;
+		if (dim == mDim)
+			return false;
 		mDim = dim;
+		return true;
+	};
+	if (take_dim())
+	{
 		/* the whole window, also where the OSD has not changed */
 		mPlaneRedraw = std::max(mPlaneRedraw, 1);
 		mState.blit = true;
@@ -1736,7 +1741,9 @@ void GLFbPC::render()
 		 * that follows has to wait a frame for it: a blit that changed
 		 * nothing is left out */
 		int box[4];
-		const bool known = takeDamage(box) && !reinit && !mPlaneRedraw;
+		const bool damage_known = takeDamage(box);
+		const bool dim_changed = take_dim();
+		const bool known = damage_known && !reinit && !mPlaneRedraw && !dim_changed;
 		if (known)
 		{
 			if (box[2] <= box[0] || box[3] <= box[1])
@@ -1747,7 +1754,7 @@ void GLFbPC::render()
 		else
 		{
 			uint64_t sum = osdScan(box);
-			if (sum == mOsdSum && !reinit && !mPlaneRedraw)
+			if (sum == mOsdSum && !reinit && !mPlaneRedraw && !dim_changed)
 				return;
 			mOsdSum = sum;
 		}
@@ -1884,6 +1891,7 @@ void GLFbPC::render()
 		}
 		else
 			bltOSDBuffer(); /* OSD */
+		take_dim();
 	}
 
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -2999,6 +3007,7 @@ bool GLFbPC::takeDamage(int rect[4])
 	memcpy(rect, mDamage, sizeof(mDamage));
 	memset(mDamage, 0, sizeof(mDamage));
 	mDamageAll = false;
+	mDimTaken = mDimBlit;
 	return known;
 }
 
