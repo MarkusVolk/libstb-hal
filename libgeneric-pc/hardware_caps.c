@@ -19,6 +19,9 @@
 #include "video_std.h"
 #include <sys/utsname.h>
 #include "platform.h"
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <drm_fourcc.h>
 
 static int initialized = 0;
 static hw_caps_t caps;
@@ -26,6 +29,76 @@ static hw_caps_t caps;
 /* A line display as the auxdisplay drivers of the kernel make them: the text
  * goes into its attribute "message". Up to four characters are the number
  * display of a set-top box. */
+static uint64_t plane_prop(int fd, uint32_t plane, const char *name, int *found)
+{
+	drmModeObjectProperties *p = drmModeObjectGetProperties(fd, plane, DRM_MODE_OBJECT_PLANE);
+	uint64_t value = 0;
+	uint32_t i;
+	for (i = 0; p && i < p->count_props; i++)
+	{
+		drmModePropertyRes *r = drmModeGetProperty(fd, p->props[i]);
+		if (r && !strcmp(r->name, name))
+		{
+			value = p->prop_values[i];
+			if (found)
+				*found = 1;
+		}
+		drmModeFreeProperty(r);
+	}
+	drmModeFreeObjectProperties(p);
+	return value;
+}
+
+/* video planes below the primary one: the second carries the picture in
+ * picture, as the GL frontend uses them */
+static int video_planes(void)
+{
+	int most = 0, card;
+	for (card = 0; card < 4; card++)
+	{
+		char dev[32];
+		uint64_t primary_z = 0, z[16];
+		int n = 0, below = 0, have_primary = 0, fd;
+		uint32_t i, f;
+		snprintf(dev, sizeof(dev), "/dev/dri/card%d", card);
+		fd = open(dev, O_RDWR | O_CLOEXEC);
+		if (fd < 0)
+			continue;
+		drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+		drmModePlaneRes *res = drmModeGetPlaneResources(fd);
+		for (i = 0; res && i < res->count_planes; i++)
+		{
+			drmModePlane *p = drmModeGetPlane(fd, res->planes[i]);
+			int has_z = 0;
+			uint64_t type, zpos;
+			if (!p)
+				continue;
+			type = plane_prop(fd, p->plane_id, "type", NULL);
+			zpos = plane_prop(fd, p->plane_id, "zpos", &has_z);
+			if (has_z && type == DRM_PLANE_TYPE_PRIMARY)
+			{
+				primary_z = zpos;
+				have_primary = 1;
+			}
+			else if (has_z && type == DRM_PLANE_TYPE_OVERLAY && n < 16)
+				for (f = 0; f < p->count_formats; f++)
+					if (p->formats[f] == DRM_FORMAT_NV12)
+					{
+						z[n++] = zpos;
+						break;
+					}
+			drmModeFreePlane(p);
+		}
+		drmModeFreePlaneResources(res);
+		close(fd);
+		for (i = 0; have_primary && i < (uint32_t)n; i++)
+			below += z[i] < primary_z;
+		if (below > most)
+			most = below;
+	}
+	return most;
+}
+
 static void probe_display(void)
 {
 	glob_t g;
@@ -66,12 +139,15 @@ hw_caps_t *get_hwcaps(void)
 
 	memset(&caps, 0, sizeof(hw_caps_t));
 
-	if (access("/dev/dvb/adapter0/video1", F_OK) != -1)
-		caps.can_pip = 1;
-
 	caps.can_cpufreq = 0;
 	/* a desktop shuts down and reboots itself, the box does it through neutrino */
 	caps.windowed = getenv("WAYLAND_DISPLAY") || getenv("DISPLAY");
+	/* the picture in picture needs a plane of its own for now */
+	if (!caps.windowed && video_planes() >= 2)
+	{
+		caps.can_pip = 1;
+		caps.pip_devs = 1;
+	}
 	caps.can_shutdown = !caps.windowed;
 	caps.display_type = HW_DISPLAY_LINE_TEXT;
 	caps.has_HDMI = 1;

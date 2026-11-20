@@ -48,11 +48,16 @@
 #include <mpv/render_gl.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
+#include <drm_fourcc.h>
+extern "C" {
+#include <libavutil/hwcontext_drm.h>
+}
 #include "glfb_priv.h"
 #include "platform.h"
 #include "video_lib.h"
 #include "audio_lib.h"
 #include "hardware_caps.h"
+#include "pip.h"
 
 #include "hal_debug.h"
 
@@ -89,11 +94,12 @@ static uint64_t planeProp(int fd, uint32_t plane, const char *name, bool *found)
 
 /* A plane that scans out NV12 below the primary one. With that, the window
  * stays on the primary plane; hardware without it has the primary plane at
- * the bottom, and the window goes on an overlay plane above it. */
-static uint32_t videoPlaneBelowPrimary(int fd)
+ * the bottom, and the window goes on an overlay plane above it. The lowest
+ * such plane takes the video, the next one up the picture in picture. */
+static uint32_t videoPlaneBelowPrimary(int fd, uint32_t *pip)
 {
-	uint32_t video = 0;
-	uint64_t video_z = 0, primary_z = 0;
+	std::vector<std::pair<uint64_t, uint32_t> > video;
+	uint64_t primary_z = 0;
 	bool have_primary = false;
 	drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
 	drmModePlaneRes *res = drmModeGetPlaneResources(fd);
@@ -113,20 +119,25 @@ static uint32_t videoPlaneBelowPrimary(int fd)
 		else if (has_z && type == DRM_PLANE_TYPE_OVERLAY)
 		{
 			for (uint32_t f = 0; f < p->count_formats; f++)
-				if (p->formats[f] == 0x3231564e /* NV12 */)
+				if (p->formats[f] == DRM_FORMAT_NV12)
 				{
-					video = p->plane_id;
-					video_z = z;
+					video.push_back(std::make_pair(z, p->plane_id));
+					break;
 				}
 		}
 		drmModeFreePlane(p);
 	}
 	drmModeFreePlaneResources(res);
-	return (have_primary && video && video_z < primary_z) ? video : 0;
+	std::sort(video.begin(), video.end());
+	while (!video.empty() && (!have_primary || video.back().first >= primary_z))
+		video.pop_back();
+	if (pip)
+		*pip = video.size() > 1 ? video[1].second : 0;
+	return video.empty() ? 0 : video[0].second;
 }
 
 /* before SDL has opened the display */
-static uint32_t videoPlaneBelowPrimary()
+static uint32_t videoPlaneBelowPrimary(uint32_t *pip)
 {
 	uint32_t plane = 0;
 	for (int i = 0; i < 4 && !plane; i++)
@@ -136,7 +147,7 @@ static uint32_t videoPlaneBelowPrimary()
 		int fd = open(dev, O_RDWR | O_CLOEXEC);
 		if (fd < 0)
 			continue;
-		plane = videoPlaneBelowPrimary(fd);
+		plane = videoPlaneBelowPrimary(fd, pip);
 		close(fd);
 	}
 	return plane;
@@ -342,6 +353,14 @@ GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mS
 	mVideoPlane = 0;
 	mDeintProp = 0;
 	memset(mDeintValue, 0, sizeof(mDeintValue));
+	mPipPlane = 0;
+	mPipCrtc = 0;
+	memset(mPipProp, 0, sizeof(mPipProp));
+	mPipShown.fb = mPipNext.fb = 0;
+	mPipShown.frame = mPipNext.frame = NULL;
+	mPipSet = mPipOff = mPipServed = false;
+	mPipServedNs = 0;
+	memset(mPipWin, 0, sizeof(mPipWin));
 	mConnCheckNext = 0;
 	mEdidMissing = false;
 	mDisplayWait = false;
@@ -559,9 +578,10 @@ bool GLFbPC::createDisplay()
 	 * the video stays in GL. */
 	const char *plane = getenv("GLFB_VIDEO_PLANE");
 	mVideoPlane = 0;
+	mPipPlane = 0;
 	if (!plane || strcmp(plane, "0"))
 	{
-		mVideoPlane = videoPlaneBelowPrimary();
+		mVideoPlane = videoPlaneBelowPrimary(&mPipPlane);
 		if (!mVideoPlane)
 			SDL_SetHint(SDL_HINT_KMSDRM_DISPLAY_PLANE, "overlay");
 	}
@@ -1060,6 +1080,9 @@ void GLFbPC::pollEvents()
 		timeout = sleep_us > 1000 ? sleep_us / 1000 : 1;
 	if (mFramePending)
 		timeout = 5;
+	/* a PIP frame that is not due yet */
+	if (mPipPlane && timeout > 10 && cPip::getInstance()->pending())
+		timeout = 10;
 	if (mPadKey)
 	{
 		uint64_t now = SDL_GetTicks();
@@ -1638,6 +1661,10 @@ void GLFbPC::render()
 	/* The video on the plane below the window: the GPU only draws the OSD,
 	 * and only when it has changed. */
 	const bool on_plane = (mPlaneOK && vp.valid && vp.drmprime) || mExternalVideo;
+	/* the PIP goes on without the video, through a zap and on a
+	 * channel without a picture */
+	if (!on_plane)
+		pipOnly();
 	if (on_plane != mOnPlane)
 	{
 		mOnPlane = on_plane;
@@ -1686,6 +1713,11 @@ void GLFbPC::render()
 			if (engine)
 				engine->renderEnd();
 		}
+		/* the video carries the PIP; where it has had no frame for two
+		 * display frames, the PIP goes on alone */
+		if (!mPipServed && SDL_GetTicksNS() - mPipServedNs > 40 * SDL_NS_PER_MS)
+			pipOnly();
+		mPipServed = false;
 		uint64_t now = SDL_GetTicksNS();
 		if (now - plane_since >= 10 * SDL_NS_PER_SECOND)
 		{
@@ -2351,6 +2383,8 @@ bool GLFbPC::setupRender()
 	}
 	mpv_render_context_set_update_callback(mRender, renderUpdateCb, this);
 	engine->setVideoWake(renderUpdateCb, this);
+	if (mPipPlane)
+		cPip::getInstance()->setWake(renderUpdateCb, this);
 	hal_info("GLFB::%s: libmpv render context ready (%s)\n", __func__, wl ? "wayland display" : x11 ? "x11 display" : drm.render_fd >= 0 ? "drm render node" : "no native display");
 	if (mPlaneOK)
 		hal_info("GLFB::%s: DRM PRIME video goes to the %s plane of CRTC %d, the window is above it\n", __func__, mVideoPlane ? "video" : "primary", drm.crtc_id);
@@ -2427,6 +2461,27 @@ bool GLFbPC::setupPlane(void *params)
 	}
 	drmModeFreeObjectProperties(pr);
 
+	/* the picture in picture is put on its plane property by property */
+	static const char *const pip_props[10] = {
+		"FB_ID", "CRTC_ID", "SRC_X", "SRC_Y", "SRC_W", "SRC_H",
+		"CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H"
+	};
+	memset(mPipProp, 0, sizeof(mPipProp));
+	pr = mPipPlane ? drmModeObjectGetProperties(fd, mPipPlane, DRM_MODE_OBJECT_PLANE) : NULL;
+	for (uint32_t i = 0; pr && i < pr->count_props; i++)
+	{
+		drmModePropertyRes *r = drmModeGetProperty(fd, pr->props[i]);
+		for (int k = 0; r && k < 10; k++)
+			if (!strcmp(r->name, pip_props[k]))
+				mPipProp[k] = r->prop_id;
+		drmModeFreeProperty(r);
+	}
+	drmModeFreeObjectProperties(pr);
+	for (int k = 0; mPipPlane && k < 10; k++)
+		if (!mPipProp[k])
+			mPipPlane = 0;
+	mPipCrtc = crtc;
+
 	mDrmFd = fd;
 	drm->fd = fd;
 	drm->crtc_id = crtc;
@@ -2480,9 +2535,16 @@ bool GLFbPC::renderPlane(cMpvEngine *engine)
 		cMpvEngine::VideoParams vp = engine->getVideoParams();
 		drmModeAtomicAddProperty(mPlaneReq, mVideoPlane, mDeintProp, mDeintValue[!vp.interlaced ? 0 : vp.tff ? 1 : 2]);
 	}
+	if (r >= 0)
+	{
+		pipPlane();
+		mPipServed = true;
+		mPipServedNs = SDL_GetTicksNS();
+	}
 	/* The commit waits for the flip, which paces the frames to the display
 	 * and lets the swap that is reported next to mpv be the real one. */
 	int c = (r >= 0 && mPlaneReq) ? drmModeAtomicCommit(mDrmFd, mPlaneReq, 0, NULL) : -1;
+	pipCommitted(c >= 0);
 	if (mPlaneReq)
 		drmModeAtomicFree(mPlaneReq);
 	mPlaneReq = NULL;
@@ -2493,6 +2555,159 @@ bool GLFbPC::renderPlane(cMpvEngine *engine)
 		hal_info("GLFB::%s: render %d, commit %d: %m\n", __func__, r, c);
 	}
 	return r >= 0;
+}
+
+/* A decoded frame on the PIP plane: its buffers stay the decoder's, the
+ * framebuffer only points at them. */
+uint32_t GLFbPC::pipImport(AVFrame *f)
+{
+	const AVDRMFrameDescriptor *d = (const AVDRMFrameDescriptor *)f->data[0];
+	if (!d || d->nb_objects < 1 || d->nb_objects > 4 || d->nb_layers < 1)
+		return 0;
+	uint32_t bo[4] = { 0 }, handles[4] = { 0 }, pitches[4] = { 0 }, offsets[4] = { 0 };
+	uint64_t mods[4] = { 0 };
+	uint32_t fb = 0, format;
+	int n = 0;
+	bool ok = true;
+	for (int i = 0; i < d->nb_objects && ok; i++)
+		ok = drmPrimeFDToHandle(mDrmFd, d->objects[i].fd, &bo[i]) == 0;
+	/* NV12 as one layer of two planes, or as an R8 and a GR88 layer */
+	format = d->nb_layers == 1 ? d->layers[0].format : DRM_FORMAT_NV12;
+	for (int l = 0; l < d->nb_layers && ok; l++)
+		for (int p = 0; p < d->layers[l].nb_planes && n < 4; p++, n++)
+		{
+			const AVDRMPlaneDescriptor *pl = &d->layers[l].planes[p];
+			handles[n] = bo[pl->object_index];
+			pitches[n] = pl->pitch;
+			offsets[n] = pl->offset;
+			mods[n] = d->objects[pl->object_index].format_modifier;
+		}
+	if (ok && format == DRM_FORMAT_NV12 && n == 2)
+	{
+		bool linear = mods[0] == DRM_FORMAT_MOD_LINEAR || mods[0] == DRM_FORMAT_MOD_INVALID;
+		if (linear)
+			ok = drmModeAddFB2(mDrmFd, f->width, f->height, format, handles, pitches, offsets, &fb, 0) == 0;
+		else
+			ok = drmModeAddFB2WithModifiers(mDrmFd, f->width, f->height, format, handles, pitches, offsets, mods, &fb, DRM_MODE_FB_MODIFIERS) == 0;
+	}
+	else
+		ok = false;
+	/* the framebuffer holds the buffers, the handles are not needed any more */
+	for (int i = 0; i < d->nb_objects; i++)
+		if (bo[i])
+		{
+			struct drm_gem_close gc = { bo[i], 0 };
+			drmIoctl(mDrmFd, DRM_IOCTL_GEM_CLOSE, &gc);
+		}
+	static bool warned = false;
+	if (!ok && !warned)
+	{
+		warned = true;
+		hal_info("GLFB::%s: a PIP frame of format %08x in %d planes cannot go on the plane: %m\n", __func__, format, n);
+	}
+	return ok ? fb : 0;
+}
+
+void GLFbPC::pipRelease(PipFb &p)
+{
+	if (p.fb)
+		drmModeRmFB(mDrmFd, p.fb);
+	if (p.frame)
+		av_frame_free(&p.frame);
+	p.fb = 0;
+	p.frame = NULL;
+}
+
+/* adds what changes on the PIP plane to the request that is committed next */
+void GLFbPC::pipPlane()
+{
+	mPipSet = mPipOff = false;
+	mPipNext.fb = 0;
+	mPipNext.frame = NULL;
+	if (!mPipPlane || !mPlaneReq)
+		return;
+	cPip::Window w = cPip::getInstance()->window();
+	if (!w.on)
+	{
+		if (mPipShown.fb)
+		{
+			drmModeAtomicAddProperty(mPlaneReq, mPipPlane, mPipProp[0], 0);
+			drmModeAtomicAddProperty(mPlaneReq, mPipPlane, mPipProp[1], 0);
+			mPipSet = mPipOff = true;
+		}
+		return;
+	}
+	AVFrame *f = cPip::getInstance()->takeFrame();
+	if (f)
+	{
+		mPipNext.fb = pipImport(f);
+		if (mPipNext.fb)
+			mPipNext.frame = f;
+		else
+			av_frame_free(&f);
+	}
+	const PipFb &show = mPipNext.fb ? mPipNext : mPipShown;
+	bool moved = w.x != mPipWin[0] || w.y != mPipWin[1] || w.w != mPipWin[2] || w.h != mPipWin[3];
+	if (!show.fb || (!mPipNext.fb && !moved))
+		return;
+	AVFrame *src = show.frame;
+	int sx = src->crop_left, sy = src->crop_top;
+	int sw = src->width - src->crop_left - src->crop_right;
+	int sh = src->height - src->crop_top - src->crop_bottom;
+	int mw = mModeW > 0 ? mModeW : mWinW, mh = mModeH > 0 ? mModeH : mWinH;
+	uint64_t v[10] = {
+		show.fb, mPipCrtc,
+		(uint64_t)sx << 16, (uint64_t)sy << 16, (uint64_t)sw << 16, (uint64_t)sh << 16,
+		(uint64_t)(int64_t)lround(w.x * mw), (uint64_t)(int64_t)lround(w.y * mh),
+		(uint64_t)std::max(2L, lround(w.w * mw)), (uint64_t)std::max(2L, lround(w.h * mh))
+	};
+	for (int k = 0; k < 10; k++)
+		drmModeAtomicAddProperty(mPlaneReq, mPipPlane, mPipProp[k], v[k]);
+	mPipWin[0] = w.x;
+	mPipWin[1] = w.y;
+	mPipWin[2] = w.w;
+	mPipWin[3] = w.h;
+	mPipSet = true;
+}
+
+/* once the commit is through, the frame it replaced is no longer read */
+void GLFbPC::pipCommitted(bool ok)
+{
+	if (!mPipSet)
+		return;
+	mPipSet = false;
+	if (!ok)
+	{
+		pipRelease(mPipNext);
+		if (!mPipOff)
+			mPipWin[2] = -1; /* placed again with the next frame */
+		return;
+	}
+	if (mPipOff)
+	{
+		pipRelease(mPipShown);
+		memset(mPipWin, 0, sizeof(mPipWin));
+	}
+	else if (mPipNext.fb)
+	{
+		pipRelease(mPipShown);
+		mPipShown = mPipNext;
+		mPipNext.fb = 0;
+		mPipNext.frame = NULL;
+	}
+}
+
+/* a commit of the PIP plane alone, where no video frame took it along */
+void GLFbPC::pipOnly()
+{
+	if (!mPipPlane || mDrmFd < 0 || mPlaneReq)
+		return;
+	mPlaneReq = drmModeAtomicAlloc();
+	pipPlane();
+	bool ok = mPipSet && drmModeAtomicCommit(mDrmFd, mPlaneReq, 0, NULL) == 0;
+	pipCommitted(ok);
+	drmModeAtomicFree(mPlaneReq);
+	mPlaneReq = NULL;
 }
 
 /* the picture in the menus: what the GL quad got as position, mpv gets as

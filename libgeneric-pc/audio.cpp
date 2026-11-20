@@ -50,6 +50,7 @@ extern "C" {
 #define DMX_BUF_SZ 0x4000
 
 cAudio *audioDecoder = NULL;
+cAudio *pipAudioDecoder[3] = { NULL, NULL, NULL };
 extern cDemux *audioDemux;
 static uint8_t *dmxbuf = NULL;
 static int bufpos;
@@ -138,19 +139,24 @@ static void get_packet_defaults(AVPacket *pkt)
 }
 #endif
 
-cAudio::cAudio(void *, void *, void *)
+cAudio::cAudio(void *, void *, void *, unsigned int _unit)
 {
+	unit = _unit;
 	thread_started = false;
+	curr_pts = 0;
+	if (unit)
+		return;
 	if (!HAL_nodec)
 		dmxbuf = (uint8_t *)malloc(DMX_BUF_SZ);
 	bufpos = 0;
-	curr_pts = 0;
 	gThiz = this;
 	SDL_InitSubSystem(SDL_INIT_AUDIO);
 }
 
 cAudio::~cAudio(void)
 {
+	if (unit)
+		return;
 	closeDevice();
 	free(dmxbuf);
 	sinkClose(clip_sink);
@@ -198,6 +204,8 @@ int cAudio::setVolume(unsigned int left, unsigned int right)
 int cAudio::Start(void)
 {
 	hal_debug("%s >\n", __func__);
+	if (unit)
+		return 0;
 	if (HAL_live_mpv)
 	{
 		cMpvEngine *e = cMpvEngine::getInstance();
@@ -220,6 +228,8 @@ int cAudio::Start(void)
 int cAudio::Stop(void)
 {
 	hal_debug("%s >\n", __func__);
+	if (unit)
+		return 0;
 	if (HAL_live_mpv)
 	{
 		cMpvEngine *e = cMpvEngine::getInstance();

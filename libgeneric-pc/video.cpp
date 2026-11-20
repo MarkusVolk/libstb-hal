@@ -54,6 +54,7 @@ extern "C" {
 #include "hdmi_cec.h"
 #include "platform.h"
 #include "proc_tools.h"
+#include "pip.h"
 
 #include <mpv/client.h>
 #define hal_debug(args...) _hal_debug(HAL_DEBUG_VIDEO, this, args)
@@ -62,6 +63,7 @@ extern "C" {
 #define hal_debug_c(args...) _hal_debug(HAL_DEBUG_VIDEO, NULL, args)
 
 cVideo *videoDecoder = NULL;
+cVideo *pipVideoDecoder[3] = { NULL, NULL, NULL };
 extern cDemux *videoDemux;
 extern GLFbPC *glfb_priv;
 int system_rev = 0;
@@ -102,7 +104,7 @@ static const AVRational aspect_ratios[8] =
 	{ 16, 10 }
 };
 
-static AVCodecID fallback_codec_for_format(VIDEO_FORMAT format)
+AVCodecID hal_codec_for_format(VIDEO_FORMAT format)
 {
 	switch (format)
 	{
@@ -127,13 +129,14 @@ static AVCodecID fallback_codec_for_format(VIDEO_FORMAT format)
 	}
 }
 
-cVideo::cVideo(int, void *, void *, unsigned int)
+cVideo::cVideo(int, void *, void *, unsigned int _unit)
 {
 	hal_debug("%s\n", __func__);
 #if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 9, 100)
 	av_register_all();
 #endif
-	if (!HAL_nodec)
+	unit = _unit;
+	if (!HAL_nodec && !unit)
 		dmxbuf = (uint8_t *)malloc(DMX_BUF_SZ);
 	bufpos = 0;
 	thread_running = false;
@@ -155,8 +158,8 @@ cVideo::cVideo(int, void *, void *, unsigned int)
 cVideo::~cVideo(void)
 {
 	Stop();
-	/* ouch :-( */
-	videoDecoder = NULL;
+	if (videoDecoder == this)
+		videoDecoder = NULL;
 }
 
 int cVideo::setAspectRatio(int vformat, int cropping)
@@ -241,6 +244,8 @@ void cVideo::liveInfo(void)
 int cVideo::Start(void *, unsigned short, unsigned short, void *)
 {
 	hal_debug("%s running %d >\n", __func__, thread_running);
+	if (unit)
+		return cPip::getInstance()->start(unit, v_format) ? 0 : -1;
 	if (HAL_live_mpv)
 	{
 		cMpvEngine *engine = cMpvEngine::getInstance();
@@ -265,6 +270,11 @@ int cVideo::Start(void *, unsigned short, unsigned short, void *)
 int cVideo::Stop(bool)
 {
 	hal_debug("%s running %d >\n", __func__, thread_running);
+	if (unit)
+	{
+		cPip::getInstance()->stop();
+		return 0;
+	}
 	if (HAL_live_mpv)
 	{
 		cMpvEngine *engine = cMpvEngine::getInstance();
@@ -668,11 +678,22 @@ void cVideo::SetAudioDestination(int audio_dest)
 
 int cVideo::getBlank(void)
 {
-	return 0;
+	return unit ? !cPip::getInstance()->showing() : 0;
 }
 
-void cVideo::Pig(int x, int y, int w, int h, int /*osd_w*/, int /*osd_h*/, int /*startx*/, int /*starty*/, int /*endx*/, int /*endy*/)
+void cVideo::ShowPig(int on)
 {
+	if (unit)
+		cPip::getInstance()->show(on);
+}
+
+void cVideo::Pig(int x, int y, int w, int h, int osd_w, int osd_h, int /*startx*/, int /*starty*/, int /*endx*/, int /*endy*/)
+{
+	if (unit)
+	{
+		cPip::getInstance()->setRect(x, y, w, h, osd_w, osd_h);
+		return;
+	}
 	pig_x = x;
 	pig_y = y;
 	pig_w = w;
@@ -868,7 +889,7 @@ void cVideo::run(void)
 
 	if (p->codec_id == AV_CODEC_ID_NONE || p->codec_type != AVMEDIA_TYPE_VIDEO)
 	{
-		AVCodecID forced = fallback_codec_for_format(v_format);
+		AVCodecID forced = hal_codec_for_format(v_format);
 		if (forced != AV_CODEC_ID_NONE && forced != p->codec_id)
 		{
 			hal_info("%s: codec id missing, forcing %s from stream type %d\n",

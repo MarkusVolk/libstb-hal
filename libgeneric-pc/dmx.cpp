@@ -71,6 +71,9 @@ static const char *DMX_T[] =
 #define NUM_DEMUX 3
 static int dmx_source[NUM_DEMUX];
 
+cDemux *pipVideoDemux[3] = { NULL, NULL, NULL };
+cDemux *pipAudioDemux[3] = { NULL, NULL, NULL };
+
 /* uuuugly */
 static int dmx_tp_count = 0;
 #define MAX_TS_COUNT 8

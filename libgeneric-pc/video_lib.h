@@ -208,7 +208,11 @@ class cVideo : public OpenThreads::Thread
 		void SetAudioDestination(int audio_dest);
 		void StopPicture();
 		void Standby(unsigned int bOn);
-		void ShowPig(int) {}
+		void ShowPig(int on);
+		/* the picture in picture has no device of its own */
+		void closeDevice(void) {}
+		void open_AVInput_Device(void) {}
+		void close_AVInput_Device(void) {}
 		void SetHDMIColorimetry(HDMI_COLORIMETRY) {}
 		void Pig(int x, int y, int w, int h, int osd_w = 1064, int osd_h = 600, int startx = 0, int starty = 0, int endx = 1279, int endy = 719);
 		void SetControl(int, int) { return; };
@@ -228,6 +232,7 @@ class cVideo : public OpenThreads::Thread
 	private:
 		void run();
 		void liveInfo(void);
+		unsigned int unit;	/* above 0 the picture in picture */
 		SWFramebuffer buffers[VDEC_MAXBUFS];
 		int dec_w, dec_h;
 		int dec_r;

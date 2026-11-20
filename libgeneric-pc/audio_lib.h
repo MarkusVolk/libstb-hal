@@ -60,7 +60,7 @@ class cAudio : public OpenThreads::Thread
 		int64_t curr_pts;
 
 		void openDevice(void);
-		void closeDevice(void);
+		unsigned int unit;	/* above 0 the picture in picture, which has no sound */
 
 		int do_mute(bool enable, bool remember);
 		void setBypassMode(bool disable);
@@ -68,8 +68,9 @@ class cAudio : public OpenThreads::Thread
 
 	public:
 		/* construct & destruct */
-		cAudio(void *, void *, void *);
+		cAudio(void *, void *, void *, unsigned int unit = 0);
 		~cAudio(void);
+		void closeDevice(void);
 		int64_t getPts() { return curr_pts; }
 
 		void *GetHandle() { return NULL; };

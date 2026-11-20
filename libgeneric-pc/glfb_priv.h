@@ -225,6 +225,27 @@ class GLFbPC
 		double mMargins[4];
 		double mFit[2]; /* panscan and stretched aspect sent to mpv */
 		double mDar; /* of the video, as decoded */
+		/* the picture in picture on the next video plane up */
+		uint32_t mPipPlane;
+		uint32_t mPipCrtc;
+		uint32_t mPipProp[10]; /* FB_ID, CRTC_ID, SRC_X/Y/W/H, CRTC_X/Y/W/H */
+		struct PipFb
+		{
+			uint32_t fb;
+			struct AVFrame *frame;
+		};
+		PipFb mPipShown; /* on the plane */
+		PipFb mPipNext; /* in the request that is committed next */
+		bool mPipSet; /* that request changes the plane */
+		bool mPipOff; /* it takes the picture off */
+		double mPipWin[4]; /* where the shown one is, as a share of the screen */
+		uint32_t pipImport(struct AVFrame *f);
+		void pipRelease(PipFb &p);
+		void pipPlane();
+		void pipCommitted(bool ok);
+		void pipOnly();
+		bool mPipServed; /* a video frame took the PIP along */
+		uint64_t mPipServedNs; /* when one did last */
 		bool setupPlane(void *drm_params);
 		bool renderPlane(cMpvEngine *engine);
 		void planeMargins(cMpvEngine *engine);
