@@ -291,16 +291,27 @@ void GLFbPC::setDisplayMode(int w, int h, float rate)
 /* only on the GL thread */
 void GLFbPC::applyDisplayMode(int w, int h, float rate, const char *who)
 {
+	SDL_DisplayID display = SDL_GetDisplayForWindow(mWindow);
 	SDL_DisplayMode mode;
-	if (SDL_GetClosestFullscreenDisplayMode(SDL_GetDisplayForWindow(mWindow), w, h, rate, false, &mode) &&
-	    SDL_SetWindowFullscreenMode(mWindow, &mode))
+	if (!SDL_GetClosestFullscreenDisplayMode(display, w, h, rate, false, &mode))
+	{
+		/* the screen has no mode that large: without a mode of its own the
+		 * window's size would pick one, the OSD's, and SDL still reports
+		 * the desktop's; so the window takes the desktop's mode */
+		const SDL_DisplayMode *desktop = SDL_GetDesktopDisplayMode(display);
+		hal_info("GLFB: no display mode for %dx%d at %.2f Hz (%s), the desktop's instead\n", w, h, rate, who);
+		if (!desktop)
+			return;
+		mode = *desktop;
+	}
+	if (SDL_SetWindowFullscreenMode(mWindow, &mode))
 	{
 		SDL_SyncWindow(mWindow);
 		hal_info("GLFB: %s asked for %dx%d at %.2f Hz, using %dx%d at %.2f Hz\n", who, w, h, rate,
 			 mode.w, mode.h, mode.refresh_rate);
 	}
 	else
-		hal_info("GLFB: no display mode for %dx%d at %.2f Hz (%s): %s\n", w, h, rate, who, SDL_GetError());
+		hal_info("GLFB: display mode %dx%d at %.2f Hz (%s) not set: %s\n", mode.w, mode.h, mode.refresh_rate, who, SDL_GetError());
 }
 
 GLFbPC::GLFbPC(int x, int y, std::vector<unsigned char> &buf): mReInit(true), mShutDown(false), mInitDone(false), mHideReq(false), mHidden(false)
