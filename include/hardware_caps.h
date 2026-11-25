@@ -103,6 +103,7 @@ typedef struct hw_caps
 	int media_in_home; /* music, videos and pictures default to the user's home */
 	int windowed; /* shown in a window of a desktop, whose keys come from its compositor */
 	char render_node[64]; /* the DRM render node of the GPU the picture is drawn on, empty if unknown */
+	int foreign_disks; /* an internal disk may belong to another system, it is only used when chosen */
 } hw_caps_t;
 
 hw_caps_t *get_hwcaps(void);
